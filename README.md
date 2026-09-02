@@ -225,7 +225,7 @@ Run `diagnose.py` (Scripting tab > Open > Run Script) to report packaging,
 
 ### BrawlCrate: "Unable to find an entry point named 'glActiveTexture'"
 
-Not a model or add-on problem. `glActiveTexture` is OpenGL 1.3; Windows'
+Something I ran into in testing Windows, and not a model or add-on problem. `glActiveTexture` is OpenGL 1.3; Windows'
 `opengl32.dll` only exports OpenGL 1.1 and everything newer comes from a GPU
 driver. Without one, Windows falls back to the "GDI Generic" software renderer
 and the function does not exist. This is common in virtual machines.
