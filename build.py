@@ -1,23 +1,34 @@
 #!/usr/bin/env python3
-"""Build installable ZIPs for MKW Utilities.
+"""Build the installable ZIP for MKW Utilities.
 
-Produces:
-  dist/MKW-Utilities-<ver>-legacy.zip      -> Blender 3.1 - 4.1 (Edit > Preferences > Add-ons > Install)
-  dist/MKW-Utilities-<ver>-extension.zip   -> Blender 4.2+     (Extensions / drag-and-drop)
+Produces a single archive that works both ways:
 
-The legacy ZIP contains a top-level folder (Blender requires this).
-The extension ZIP is flat with blender_manifest.toml at the root.
+  * Blender 4.2+  - Extensions system (drag-and-drop / Install from Disk).
+                    Uses blender_manifest.toml.
+  * Blender 3.1 - 4.1 - Legacy add-on (Preferences > Add-ons > Install).
+                    Uses bl_info.
+
+Both metadata blocks are present; each Blender version reads the one it
+understands and ignores the other.
 """
 import os
 import re
-import shutil
 import zipfile
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DIST = os.path.join(ROOT, "dist")
 PKG = "MKW-Utilities"
-FILES = ["__init__.py", "export_obj.py", "README.md", "lower-walls.txt",
-         "diagnose.py", "LICENSE", "NOTICE.md"]
+
+FILES = [
+    "__init__.py",
+    "export_obj.py",
+    "blender_manifest.toml",
+    "lower-walls.txt",
+    "diagnose.py",
+    "README.md",
+    "LICENSE",
+    "NOTICE.md",
+]
 
 
 def get_version():
@@ -26,22 +37,32 @@ def get_version():
     return ".".join(m.groups())
 
 
+def check_version_sync(ver):
+    """The manifest and bl_info must agree, or the two install paths differ."""
+    man = open(os.path.join(ROOT, "blender_manifest.toml"), encoding="utf-8").read()
+    m = re.search(r'^version\s*=\s*"([^"]+)"', man, re.M)
+    if not m:
+        raise SystemExit("blender_manifest.toml has no version field")
+    if m.group(1) != ver:
+        raise SystemExit(
+            "version mismatch: bl_info says %s, blender_manifest.toml says %s"
+            % (ver, m.group(1)))
+
+
 def build():
     ver = get_version()
+    check_version_sync(ver)
     os.makedirs(DIST, exist_ok=True)
 
-    legacy = os.path.join(DIST, f"{PKG}-{ver}-legacy.zip")
-    with zipfile.ZipFile(legacy, "w", zipfile.ZIP_DEFLATED) as z:
+    out = os.path.join(DIST, "%s-%s.zip" % (PKG, ver))
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
         for f in FILES:
-            z.write(os.path.join(ROOT, f), f"{PKG}/{f}")
-    print("built", legacy)
-
-    ext = os.path.join(DIST, f"{PKG}-{ver}-extension.zip")
-    with zipfile.ZipFile(ext, "w", zipfile.ZIP_DEFLATED) as z:
-        for f in FILES + ["blender_manifest.toml"]:
-            z.write(os.path.join(ROOT, f), f)
-    print("built", ext)
-    return legacy, ext
+            path = os.path.join(ROOT, f)
+            if not os.path.isfile(path):
+                raise SystemExit("missing file: " + f)
+            z.write(path, "%s/%s" % (PKG, f))
+    print("built", out)
+    return out
 
 
 if __name__ == "__main__":

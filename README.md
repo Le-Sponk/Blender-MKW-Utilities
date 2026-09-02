@@ -19,17 +19,14 @@ fork. To retarget them, edit `GITHUB_REPO` near the top of `__init__.py`.
 
 ## Installation
 
-### Blender 4.2 and newer
+Download **`MKW-Utilities-<version>.zip`** from
+[Releases](https://github.com/Le-Sponk/Blender-MKW-Utilities/releases). The same
+file works on every supported Blender version.
 
-Download `MKW-Utilities-<ver>-extension.zip` and either:
+**Blender 4.2 and newer** - drag the ZIP into the Blender window, or
+`Edit > Preferences > Get Extensions > dropdown > Install from Disk...`
 
-- drag the ZIP into the Blender window, or
-- `Edit > Preferences > Get Extensions > dropdown > Install from Disk...`
-
-### Blender 3.1 - 4.1
-
-Download `MKW-Utilities-<ver>-legacy.zip` and use
-`Edit > Preferences > Add-ons > Install...`
+**Blender 3.1 - 4.1** - `Edit > Preferences > Add-ons > Install...`
 
 Install the **ZIP**, not a bare `__init__.py`.
 
@@ -252,7 +249,7 @@ Fixes:
 ## Development
 
 ```
-python3 build.py                 # produce both ZIPs into dist/
+python3 build.py                 # produce the ZIP into dist/
 ```
 
 Test scripts run against a real Blender binary:
