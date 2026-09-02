@@ -1,0 +1,20 @@
+schema_version = "1.0.0"
+
+id = "mkw_utilities"
+version = "1.11.0"
+name = "Mario Kart Wii Utilities"
+tagline = "Tools for creating Mario Kart Wii custom courses"
+maintainer = "Gabriela_ (unofficial update)"
+type = "add-on"
+
+website = "https://github.com/Le-Sponk/Blender-MKW-Utilities"
+
+tags = ["Import-Export", "3D View", "Object"]
+
+blender_version_min = "4.2.0"
+
+license = ["SPDX:GPL-2.0-or-later"]
+
+[permissions]
+files = "Import and export KMP, KCL and OBJ course data"
+network = "Check GitHub for plugin updates"

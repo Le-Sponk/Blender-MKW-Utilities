@@ -371,7 +371,10 @@ def write_file(filepath, objects, depsgraph, scene,
                             continue  # dont bother with this mesh.
 
                         if EXPORT_NORMALS and face_index_pairs:
-                            me.calc_normals_split()
+                            # Mesh.calc_normals_split() was removed in Blender 4.1;
+                            # split normals are now computed on demand.
+                            if hasattr(me, "calc_normals_split"):
+                                me.calc_normals_split()
                             # No need to call me.free_normals_split later, as this mesh is deleted anyway!
 
                         loops = me.loops

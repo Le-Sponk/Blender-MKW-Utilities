@@ -1,9 +1,10 @@
 # pyright: reportMissingImports=false, reportMissingModuleSource=false
 bl_info = {
     "name" : "Mario Kart Wii Utilities",
-    "author" : "Gabriela_",
-    "version" : (1, 10, 1),
+    "author" : "Gabriela_ (unofficial update)",
+    "version" : (1, 11, 0),
     "blender" : (3, 1, 0),
+    "description" : "Tools for creating Mario Kart Wii custom courses (KMP/KCL)",
     "location" : "View3d > Tool",
     "warning" : "",
     "wiki_url" : "",
@@ -13,6 +14,8 @@ bl_info = {
 import os
 import bpy
 import math
+import shutil
+import subprocess
 import random
 import struct 
 import requests
@@ -39,18 +42,325 @@ from bpy_extras.io_utils import (
     orientation_helper,
     path_reference_mode,
     axis_conversion,
-    _check_axis_conversion,
+    axis_conversion_ensure,
 )
 from bpy.app.handlers import persistent
 from . import export_obj
 
-from nodeitems_utils import NodeItem, register_node_categories, unregister_node_categories
-from nodeitems_builtins import ShaderNodeCategory
+# Pre-4.0 node menu system. Deprecated and scheduled for removal, so import
+# defensively; 4.0+ uses NODE_MT_shader_node_add_all instead.
+try:
+    from nodeitems_utils import NodeItem, register_node_categories, unregister_node_categories
+    from nodeitems_builtins import ShaderNodeCategory
+    HAS_NODEITEMS = True
+except ImportError:
+    NodeItem = None
+    ShaderNodeCategory = None
+    register_node_categories = unregister_node_categories = None
+    HAS_NODEITEMS = False
 
-BLENDER_30 = bpy.app.version[0] >= 3
-BLENDER_33 = bpy.app.version[0] >= 3 and bpy.app.version[1] >= 3
-BLENDER_34 = bpy.app.version[0] >= 3 and bpy.app.version[1] >= 4
-BLENDER_40 = bpy.app.version[0] >= 4
+# Repository used for update checks and the download/issue links.
+GITHUB_REPO = "Le-Sponk/Blender-MKW-Utilities"
+GITHUB_URL = "https://github.com/" + GITHUB_REPO
+GITHUB_API = "https://api.github.com/repos/" + GITHUB_REPO
+
+_V = bpy.app.version
+BLENDER_30 = _V >= (3, 0)
+BLENDER_33 = _V >= (3, 3)
+BLENDER_34 = _V >= (3, 4)
+BLENDER_40 = _V >= (4, 0)
+BLENDER_41 = _V >= (4, 1)
+BLENDER_42 = _V >= (4, 2)
+BLENDER_50 = _V >= (5, 0)
+
+
+# ---------------------------------------------------------------------------
+# Compatibility helpers (Blender 3.x -> 5.x)
+# ---------------------------------------------------------------------------
+
+def _principled_set(mat, socket_name, value):
+    """Set a Principled BSDF input by name.
+
+    Socket indices changed in Blender 4.0 and 5.0, so they cannot be used.
+    Returns False if the socket does not exist on this version.
+    """
+    node = None
+    for n in mat.node_tree.nodes:
+        if n.bl_idname == 'ShaderNodeBsdfPrincipled':
+            node = n
+            break
+    if node is None:
+        return False
+    sock = node.inputs.get(socket_name)
+    if sock is None:
+        return False
+    try:
+        sock.default_value = value
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _principled_node(mat):
+    """Find the Principled BSDF node by type rather than by name."""
+    if not mat or not mat.use_nodes or not mat.node_tree:
+        return None
+    for n in mat.node_tree.nodes:
+        if n.bl_idname == 'ShaderNodeBsdfPrincipled':
+            return n
+    return None
+
+
+# Renamed in Blender 4.0.
+SPECULAR_SOCKET = 'Specular IOR Level' if BLENDER_40 else 'Specular'
+
+
+def _detect_abmatt():
+    """Return True if the ABMatt CLI is available."""
+    try:
+        p = subprocess.run(tool_command("abmatt"), capture_output=True,
+                           text=True, timeout=10)
+        return (p.stdout + p.stderr).startswith("USAGE: abmatt")
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+# ---------------------------------------------------------------------------
+# External tool discovery (Wiimms SZS Tools / ABMatt)
+# ---------------------------------------------------------------------------
+#
+# Blender launched from a desktop icon / Start menu does not inherit the login
+# shell's PATH, so an installed `wszst` is often invisible to subprocess. Search
+# PATH and the standard install locations, and allow an explicit folder to be
+# set in the add-on preferences.
+
+
+def _build_tool_search_dirs():
+    """Standard locations to look for wszst/wkclt/abmatt.
+
+    Paths are derived from environment variables where possible so nothing is
+    tied to a particular drive letter or user account.
+    """
+    dirs = []
+
+    # POSIX system locations
+    dirs += ["/usr/local/bin", "/usr/bin", "/bin",
+             "/opt/wiimm/bin", "/opt/szs/bin", "/usr/local/szs/bin",
+             "/opt/homebrew/bin"]
+
+    # Per-user locations
+    home = os.path.expanduser("~")
+    if home and home != "~":
+        dirs += [os.path.join(home, ".local", "bin"),
+                 os.path.join(home, "bin")]
+
+    # Sandboxed Blender: the host filesystem is mounted elsewhere.
+    # Flatpak exposes it under /run/host, Snap under /var/lib/snapd/hostfs.
+    for root in ("/run/host", "/var/run/host", "/run/host/root",
+                 "/var/lib/snapd/hostfs"):
+        dirs += [os.path.join(root, "usr", "local", "bin"),
+                 os.path.join(root, "usr", "bin"),
+                 os.path.join(root, "bin")]
+
+    # Windows: resolve program-files and the system drive from the environment
+    # rather than assuming C:.
+    for var in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"):
+        base = os.environ.get(var)
+        if base:
+            for sub in (("Wiimm", "SZS", "bin"), ("Wiimm", "SZS"),
+                        ("szs", "bin"), ("szs"), ("Wiimm",)):
+                sub = (sub,) if isinstance(sub, str) else sub
+                dirs.append(os.path.join(base, *sub))
+
+    sysdrive = os.environ.get("SystemDrive")
+    if sysdrive:
+        dirs += [os.path.join(sysdrive + os.sep, "szs", "bin"),
+                 os.path.join(sysdrive + os.sep, "szs"),
+                 os.path.join(sysdrive + os.sep, "wiimm", "bin")]
+
+    localappdata = os.environ.get("LOCALAPPDATA")
+    if localappdata:
+        dirs += [os.path.join(localappdata, "Programs", "szs"),
+                 os.path.join(localappdata, "Programs", "Wiimm", "SZS")]
+
+    # De-duplicate while preserving order
+    seen = set()
+    result = []
+    for d in dirs:
+        if d and d not in seen:
+            seen.add(d)
+            result.append(d)
+    return result
+
+
+_TOOL_SEARCH_DIRS = _build_tool_search_dirs()
+
+
+def detect_sandbox():
+    """Return 'flatpak', 'snap' or "" describing how Blender is confined.
+
+    A sandboxed Blender cannot see the host's /usr/local, which makes an
+    installed WSZST appear to be missing.
+    """
+    if os.path.exists("/.flatpak-info") or os.environ.get("FLATPAK_ID"):
+        return "flatpak"
+    if os.environ.get("SNAP") or os.environ.get("SNAP_NAME"):
+        return "snap"
+    return ""
+
+
+def _flatpak_spawn_works():
+    """True if we can run host commands via flatpak-spawn --host."""
+    if detect_sandbox() != "flatpak":
+        return False
+    try:
+        p = subprocess.run(
+            ["flatpak-spawn", "--host", "wszst", "version"],
+            capture_output=True, text=True, timeout=10,
+        )
+        return p.stdout.startswith("wszst: Wiimms SZS Tool")
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+_tool_cache = {}
+_use_flatpak_spawn = False
+
+
+def tool_command(name):
+    """Return an argv prefix that will run tool `name`.
+
+    Normally the resolved absolute path; inside Flatpak, a flatpak-spawn
+    invocation that escapes the sandbox onto the host.
+    """
+    if _use_flatpak_spawn:
+        return ["flatpak-spawn", "--host", name]
+    exe = _resolve_tool(name)
+    return [exe] if exe else [name]
+
+wszstInstalled = False
+
+
+def _user_tool_dir():
+    """Optional user-configured folder from add-on preferences."""
+    try:
+        prefs = get_prefs(bpy.context)
+        d = (prefs.wszst_path or "").strip()
+        if d:
+            return bpy.path.abspath(d)
+    except Exception:
+        pass
+    return ""
+
+
+def _resolve_tool(name, use_cache=True):
+    """Return an absolute path to `name`, or "" if it cannot be found.
+
+    Search order: user preference folder -> PATH -> known install locations.
+    """
+    if use_cache and name in _tool_cache:
+        return _tool_cache[name]
+
+    candidates = []
+    user_dir = _user_tool_dir()
+    if user_dir:
+        # Accept either the folder or the executable itself.
+        if os.path.isfile(user_dir):
+            candidates.append(user_dir)
+        else:
+            candidates.append(os.path.join(user_dir, name))
+            candidates.append(os.path.join(user_dir, "bin", name))
+
+    found = ""
+    for c in candidates:
+        for cand in (c, c + ".exe"):
+            if os.path.isfile(cand) and os.access(cand, os.X_OK):
+                found = cand
+                break
+        if found:
+            break
+
+    if not found:
+        found = shutil.which(name) or ""
+
+    if not found:
+        for d in _TOOL_SEARCH_DIRS:
+            for cand in (os.path.join(d, name), os.path.join(d, name + ".exe")):
+                if os.path.isfile(cand) and os.access(cand, os.X_OK):
+                    found = cand
+                    break
+            if found:
+                break
+
+    _tool_cache[name] = found
+    return found
+
+
+def _detect_wszst(use_cache=True):
+    """Check for the Wiimms SZS toolset."""
+    global _use_flatpak_spawn
+
+    exe = _resolve_tool("wszst", use_cache=use_cache)
+    if exe:
+        try:
+            out = subprocess.run(
+                [exe, "version"],
+                capture_output=True, text=True, timeout=5,
+            ).stdout
+            if out.startswith("wszst: Wiimms SZS Tool"):
+                _use_flatpak_spawn = False
+                return True
+        except (OSError, subprocess.SubprocessError):
+            # May be present but not executable, e.g. on a noexec mount.
+            pass
+
+    # Sandboxed: try to run the tool on the host instead.
+    if _flatpak_spawn_works():
+        _use_flatpak_spawn = True
+        return True
+
+    _use_flatpak_spawn = False
+    return False
+
+
+def wszst_available():
+    """Cached availability, safe to call on every panel redraw."""
+    global wszstInstalled
+    return wszstInstalled
+
+
+def refresh_tool_detection():
+    """Re-run detection, clearing caches. Returns the new wszst state."""
+    global wszstInstalled
+    _tool_cache.clear()
+    wszstInstalled = _detect_wszst(use_cache=False)
+    return wszstInstalled
+
+
+def _on_wszst_path_changed(self, context):
+    """Property update callback."""
+    refresh_tool_detection()
+    if wszstInstalled:
+        try:
+            bpy.types.TOPBAR_MT_file_export.remove(export_kcl_button)
+            bpy.types.TOPBAR_MT_file_import.remove(import_kcl_button)
+        except (RuntimeError, ValueError):
+            pass
+        bpy.types.TOPBAR_MT_file_export.append(export_kcl_button)
+        bpy.types.TOPBAR_MT_file_import.append(import_kcl_button)
+
+
+def _mesh_calc_normals_split(me):
+    """Mesh.calc_normals_split() was removed in Blender 4.1."""
+    if not BLENDER_41 and hasattr(me, "calc_normals_split"):
+        me.calc_normals_split()
+
+
+def _check_axis_conversion_compat(op):
+    """Public-API equivalent of bpy_extras.io_utils._check_axis_conversion."""
+    if hasattr(op, "axis_forward") and hasattr(op, "axis_up"):
+        return axis_conversion_ensure(op, "axis_forward", "axis_up")
+    return False
 lastselection = []
 setting1users = ["A2", "A3", "A6", "A8", "A9", "A10"]
 setting2users = ["A3", "A6", "A10"]
@@ -573,13 +883,13 @@ class openGithub(bpy.types.Operator):
         scene = context.scene
         mytool = scene.kmpt
         if(get_prefs(context).prerelease_bool):
-            responseVersions = requests.get("https://api.github.com/repos/Gabriela-Orzechowska/Blender-MKW-Utilities/releases")
+            responseVersions = requests.get(GITHUB_API + "/releases", timeout=5)
             prerelease = responseVersions.json()[0]["url"]
-            responseVersions = requests.get(prerelease)
+            responseVersions = requests.get(prerelease, timeout=5)
             prerelease_version = responseVersions.json()["tag_name"]
-            webbrowser.get().open('https://github.com/Gabriela-Orzechowska/Blender-MKW-Utilities/releases/tag/{0}'.format(prerelease_version))
+            webbrowser.get().open(GITHUB_URL + '/releases/tag/{0}'.format(prerelease_version))
         else:
-            webbrowser.get().open('http://www.github.com/Gabriela-Orzechowska/Blender-KMP-Utilities/releases/latest')
+            webbrowser.get().open(GITHUB_URL + '/releases/latest')
         return {'FINISHED'}
 
 class openWSZSTPage(bpy.types.Operator):
@@ -590,12 +900,50 @@ class openWSZSTPage(bpy.types.Operator):
         webbrowser.get().open('https://szs.wiimm.de/download.html')
         return {'FINISHED'}
 
+
+class refresh_wszst(bpy.types.Operator):
+    bl_idname = "mkw.refresh_tools"
+    bl_label = "Re-check for WSZST"
+    bl_description = ("Search again for the Wiimms SZS Tools. Use this after "
+                      "installing them, or after setting the folder in the "
+                      "add-on preferences, instead of restarting Blender")
+
+    def execute(self, context):
+        found = refresh_tool_detection()
+        if found:
+            # Menu entries are normally added at register time.
+            try:
+                bpy.types.TOPBAR_MT_file_export.remove(export_kcl_button)
+                bpy.types.TOPBAR_MT_file_import.remove(import_kcl_button)
+            except (RuntimeError, ValueError):
+                pass
+            bpy.types.TOPBAR_MT_file_export.append(export_kcl_button)
+            bpy.types.TOPBAR_MT_file_import.append(import_kcl_button)
+            self.report({'INFO'}, "Found Wiimms SZS Tools: " + _resolve_tool("wszst"))
+        else:
+            sandbox = detect_sandbox()
+            if sandbox == "flatpak":
+                self.report({'ERROR'},
+                            "Blender is a Flatpak and cannot see /usr/local. Run: "
+                            "flatpak override --user --filesystem=host org.blender.Blender")
+            elif sandbox == "snap":
+                self.report({'ERROR'},
+                            "Blender is a Snap and cannot access host binaries. "
+                            "Install Blender from blender.org or apt instead.")
+            else:
+                self.report({'WARNING'},
+                            "Still could not find wszst. Set the folder in "
+                            "Preferences > Add-ons > Mario Kart Wii Utilities.")
+        for area in context.screen.areas:
+            area.tag_redraw()
+        return {'FINISHED'}
+
 class openIssuePage(bpy.types.Operator):
     bl_idname = "open.issue"
     bl_label = "Report a bug"
 
     def execute(self, context):
-        webbrowser.get().open('https://github.com/Gabriela-Orzechowska/Blender-MKW-Utilities/issues/new')
+        webbrowser.get().open(GITHUB_URL + '/issues/new')
         return {'FINISHED'}
 
 class buildSZSCurrent(bpy.types.Operator):
@@ -760,7 +1108,27 @@ class KCLUtilities(bpy.types.Panel):
                 text=text,
                 parent=layout
             )
-            layout.operator("open.wszst")
+            row = layout.row()
+            row.operator("open.wszst")
+            row.operator("mkw.refresh_tools", icon='FILE_REFRESH')
+            sandbox = detect_sandbox()
+            if sandbox:
+                box = layout.box()
+                box.label(text="This Blender is a %s package." % sandbox.capitalize(),
+                          icon='ERROR')
+                box.label(text="Sandboxed Blender cannot see /usr/local,")
+                box.label(text="even though WSZST is installed correctly.")
+                if sandbox == "flatpak":
+                    box.label(text="Fix: run this in a terminal, then Re-check:")
+                    box.label(text="flatpak override --user \\")
+                    box.label(text="  --filesystem=host org.blender.Blender")
+                else:
+                    box.label(text="Fix: install Blender from blender.org")
+                    box.label(text="or via apt instead of snap.")
+            else:
+                layout.label(text="Already installed? Click Re-check, or set the",
+                             icon='INFO')
+                layout.label(text="folder in Preferences > Add-ons.")
         
         layout.prop(mytool, "kcl_masterType")
         if(mytool.kcl_masterType == "T18"):
@@ -1126,12 +1494,8 @@ class remove_specular_metalic(bpy.types.Operator):
                 for item in obj.material_slots:
                     mat = bpy.data.materials[item.name]
                     if mat.use_nodes:
-                        if(BLENDER_30):
-                            mat.node_tree.nodes['Principled BSDF'].inputs[7].default_value = 0
-                            mat.node_tree.nodes['Principled BSDF'].inputs[6].default_value = 0
-                        else:                    
-                            mat.node_tree.nodes['Principled BSDF'].inputs[4].default_value = 0
-                            mat.node_tree.nodes['Principled BSDF'].inputs[5].default_value = 0
+                        _principled_set(mat, SPECULAR_SOCKET, 0)
+                        _principled_set(mat, 'Metallic', 0)
     
 
         return {'FINISHED'}
@@ -1148,10 +1512,7 @@ class restore_specular_metalic(bpy.types.Operator):
                 for item in obj.material_slots:
                     mat = bpy.data.materials[item.name]
                     if mat.use_nodes:
-                        if(BLENDER_30):
-                            mat.node_tree.nodes['Principled BSDF'].inputs[7].default_value = 1
-                        else:                    
-                            mat.node_tree.nodes['Principled BSDF'].inputs[5].default_value = 1
+                        _principled_set(mat, SPECULAR_SOCKET, 1)
     
 
         return {'FINISHED'}
@@ -2649,7 +3010,7 @@ class export_kcl_file(bpy.types.Operator):
     def check(self, _context):
         import os
         change_ext = False
-        change_axis = _check_axis_conversion(self)
+        change_axis = _check_axis_conversion_compat(self)
 
         check_extension = self.check_extension
 
@@ -2761,6 +3122,42 @@ class export_kcl_file(bpy.types.Operator):
             
             return {'CANCELLED'}
 
+        # Report what is being written. Unflagged objects are dropped, which
+        # otherwise silently produces a near-empty file.
+        _all_meshes = [o for o in bpy.data.objects if o.type == "MESH"]
+        _skipped = [o.name for o in _all_meshes if o not in objectsToExport]
+        _n_tris = 0
+        _bb_min = [float("inf")] * 3
+        _bb_max = [float("-inf")] * 3
+        for _o in objectsToExport:
+            try:
+                _me = _o.data
+                _n_tris += sum(max(len(p.vertices) - 2, 0) for p in _me.polygons)
+                for _c in _o.bound_box:
+                    _w = _o.matrix_world @ Vector(_c)
+                    for _k in range(3):
+                        _bb_min[_k] = min(_bb_min[_k], _w[_k])
+                        _bb_max[_k] = max(_bb_max[_k], _w[_k])
+            except (AttributeError, ReferenceError):
+                pass
+        _extent = [(_bb_max[k] - _bb_min[k]) * self.kclExportScale for k in range(3)]
+        print("[MKW Utilities] KCL export: %d object(s), %d triangle(s)"
+              % (len(objectsToExport), _n_tris))
+        print("[MKW Utilities] KCL extent (game units): "
+              "X=%.1f Y=%.1f Z=%.1f  (scale=%g)"
+              % (_extent[0], _extent[1], _extent[2], self.kclExportScale))
+        if _skipped:
+            print("[MKW Utilities] SKIPPED (no valid KCL flag in name): "
+                  + ", ".join(_skipped))
+            self.report({"WARNING"},
+                        "%d object(s) skipped - no KCL flag in name (e.g. "
+                        "'road_F0000'). Exported %d object(s), %d triangles."
+                        % (len(_skipped), len(objectsToExport), _n_tris))
+        else:
+            self.report({"INFO"},
+                        "Exporting %d object(s), %d triangles."
+                        % (len(objectsToExport), _n_tris))
+
         bpy.ops.object.select_all(action='DESELECT')
         for obj in objectsToExport:
             obj.select_set(True)
@@ -2775,7 +3172,8 @@ class export_kcl_file(bpy.types.Operator):
         except:
             self.report({"WARNING"}, "OBJ Export failed. Nothing was exported. Check the console for more details.")
             return {'CANCELLED'}
-        wkclt = r'wkclt encode "{0}" --dest "{1}"'.format(objfilename,filepath)
+        wkclt_cmd = " ".join('"{0}"'.format(a) for a in tool_command("wkclt"))
+        wkclt = r'{0} encode "{1}" --dest "{2}"'.format(wkclt_cmd,objfilename,filepath)
         if(self.kclEncodeScale[:] != (1.0,1.0,1.0)):
             wkclt += (" --scale " + str(self.kclEncodeScale[:])[1:-1].replace(" ", ""))
         if(self.kclEncodeShift[:] != (0.0,0.0,0.0)):
@@ -2817,8 +3215,13 @@ class export_kcl_file(bpy.types.Operator):
         script_file = os.path.normpath(__file__)
         directory = os.path.dirname(script_file)
         if (self.kclExportUnBeanCorner == "LOWER" or self.kclExportUnBeanCorner == "BOTH"):
-           # wkclt += (" --kcl-script=\"" + directory + "\lower-walls.txt\" --const lower=" + str(self.kclExportLowerWallsBy) + ",degree=" + str(self.kclExportLowerDegree)+ ",") 
-            wkclt += r' --kcl-script="{0}\lower-walls.txt" --const lower={1},degree={2},'.format(directory,str(self.kclExportLowerWallsBy),str(self.kclExportLowerDegree))
+            # os.path.join keeps the separator correct on all platforms.
+            script_path = os.path.join(directory, "lower-walls.txt")
+            if not os.path.isfile(script_path):
+                self.report({"ERROR"}, "lower-walls.txt is missing from the plugin folder; reinstall the add-on.")
+                return {'CANCELLED'}
+            wkclt += ' --kcl-script="{0}" --const lower={1},degree={2},'.format(
+                script_path, str(self.kclExportLowerWallsBy), str(self.kclExportLowerDegree))
         else:
             if(self.kclExportQuality == "CUSTOM"):
                 wkclt += " --const "
@@ -2897,7 +3300,7 @@ class import_kcl_file(bpy.types.Operator):
         return {'RUNNING_MODAL'}
 
     def check(self, _context):
-        return _check_axis_conversion(self)
+        return _check_axis_conversion_compat(self)
 
     filter_glob: StringProperty(
         default='*.kcl;*.szs',
@@ -2922,7 +3325,8 @@ class import_kcl_file(bpy.types.Operator):
         filedata = ""
         currentTime = time.time() #Get the current time, add to filepath
         objFilepath = filepath[:-4] + str(currentTime) + ".obj"
-        wkcltCommand = r'wkclt decode "{0}" -o --dest "{1}"'.format(filepath,objFilepath)
+        wkclt_cmd = " ".join('"{0}"'.format(a) for a in tool_command("wkclt"))
+        wkcltCommand = r'{0} decode "{1}" -o --dest "{2}"'.format(wkclt_cmd,filepath,objFilepath)
         os.system(wkcltCommand)
 
         #Import OBJ to Blenduh
@@ -3008,17 +3412,26 @@ class export_autodesk_dae(bpy.types.Operator, ExportHelper):
         return {'FINISHED'}
 
 def dae_convert(filepath):
+    """Convert an FBX to COLLADA via the bundled Autodesk FbxConverter.
+
+    The converter is Windows-only; raises RuntimeError elsewhere.
+    """
     script_file = os.path.normpath(__file__)
     directory = os.path.dirname(script_file)
-    curTime = str(time.time()/2)
-    converterDir = "\"" + directory + "\\bin\\FbxConverter.exe" + "\""
-    daeFile = filepath[:-4]+curTime+".dae"
-    command = converterDir + " \"" + filepath + "\" \"" + daeFile + "\" /sffFBX /dffCOLLADA /v"
-    a = os.popen(command).read()
-    print(a)
+    converter = os.path.join(directory, "bin", "FbxConverter.exe")
+    if not os.path.isfile(converter):
+        raise RuntimeError(
+            "FbxConverter.exe not found (bundled Windows-only tool). "
+            "Autodesk Collada export is not available on this platform."
+        )
+    curTime = str(time.time() / 2)
+    daeFile = filepath[:-4] + curTime + ".dae"
+    subprocess.run(
+        [converter, filepath, daeFile, "/sffFBX", "/dffCOLLADA", "/v"],
+        check=False,
+    )
     os.remove(filepath)
-    filename = filepath.split("\\")[-1]
-    os.rename(daeFile,filepath)
+    os.replace(daeFile, filepath)
 
 class export_minimap(bpy.types.Operator, ExportHelper):
     bl_idname = "export.minimap"
@@ -3035,35 +3448,85 @@ class export_minimap(bpy.types.Operator, ExportHelper):
     exportCollection : BoolProperty(name="Active collection", default = False)
 
     @classmethod
-    def poll(cls,context):
-        a = False
-        check = os.popen('abmatt').read()
-        print(check)
-        if(check.startswith("USAGE: abmatt")):
-            a = True
-        return a
+    def poll(cls, context):
+        return _detect_abmatt()
 
     def execute(self, context):
         filepath = self.filepath
-        filename = filepath.split("\\")[-1]
+        directory = os.path.dirname(filepath)
+        filename = os.path.basename(filepath)
         name = '.'.join(filename.split(".")[:-1])
         curTime = str(time.time())
         if not 'map' in name:
             name += ".map"
         brresName = name + ".brres"
-        daeName = name + curTime + ".dae"
-        tempFilepath = '\\'.join(filepath.split("\\")[:-1])
-        daeFilepath = tempFilepath + "\\" + daeName
-        brresFilepath = tempFilepath + "\\" + brresName
-        bpy.ops.export_scene.fbx(filepath = daeFilepath, use_selection = self.exportSelection, filter_glob='*.dae', use_active_collection = self.exportCollection, global_scale = self.exportScale, apply_scale_options='FBX_SCALE_NONE', object_types={'MESH'}, use_mesh_modifiers=True, bake_anim=False)
-        dae_convert(filepath=daeFilepath)
-        abmatt = r'abmatt convert "{0}" to "{1}" -o'.format(daeFilepath,brresFilepath)
-        os.system(abmatt)
-        abmatt = r'abmatt -b {0} -o -n * -k SCALE -v multiplyby1'.format(brresFilepath)
-        os.system(abmatt)
-        os.remove(daeFilepath)
+        brresFilepath = os.path.join(directory, brresName)
+
+        # ABMatt accepts DAE or OBJ. FbxConverter.exe is Windows-only and
+        # Collada export was removed in Blender 5.0, so fall back to OBJ,
+        # which is available on every platform and version.
+        converter = os.path.join(os.path.dirname(os.path.normpath(__file__)),
+                                 "bin", "FbxConverter.exe")
+        use_fbx = os.path.isfile(converter)
+
+        if use_fbx:
+            interFilepath = os.path.join(directory, name + curTime + ".dae")
+            bpy.ops.export_scene.fbx(filepath = interFilepath, use_selection = self.exportSelection, filter_glob='*.dae', use_active_collection = self.exportCollection, global_scale = self.exportScale, apply_scale_options='FBX_SCALE_NONE', object_types={'MESH'}, use_mesh_modifiers=True, bake_anim=False)
+            try:
+                dae_convert(filepath=interFilepath)
+            except RuntimeError as exc:
+                self.report({"ERROR"}, str(exc))
+                if os.path.isfile(interFilepath):
+                    os.remove(interFilepath)
+                return {'CANCELLED'}
+        else:
+            interFilepath = os.path.join(directory, name + curTime + ".obj")
+
+            # ABMatt cannot pack a mesh with no material; it fails with an
+            # AttributeError on NoneType. Report it clearly instead.
+            if self.exportSelection:
+                candidates = [o for o in context.selected_objects if o.type == 'MESH']
+            elif self.exportCollection:
+                candidates = [o for o in context.collection.objects if o.type == 'MESH']
+            else:
+                candidates = [o for o in context.scene.objects if o.type == 'MESH']
+            missing = [o.name for o in candidates
+                       if not any(s.material for s in o.material_slots)]
+            if missing:
+                self.report(
+                    {"ERROR"},
+                    "ABMatt requires every exported mesh to have a material. "
+                    "Missing on: " + ", ".join(missing[:5])
+                    + ("..." if len(missing) > 5 else ""))
+                return {'CANCELLED'}
+
+            # ABMatt requires triangulated geometry.
+            bpy.ops.wm.obj_export(
+                filepath=interFilepath,
+                export_selected_objects=self.exportSelection,
+                global_scale=self.exportScale,
+                export_materials=True,
+                export_normals=True,
+                export_uv=True,
+                export_triangulated_mesh=True,
+                apply_modifiers=True,
+            )
+
+        abmatt_cmd = tool_command("abmatt")
+        subprocess.run(abmatt_cmd + ["convert", interFilepath, "to", brresFilepath, "-o"], check=False)
+        subprocess.run(abmatt_cmd + ["-b", brresFilepath, "-o", "-n", "*",
+                        "-k", "SCALE", "-v", "multiplyby1"], check=False)
+
+        for tmp in (interFilepath, os.path.splitext(interFilepath)[0] + ".mtl"):
+            if os.path.isfile(tmp):
+                os.remove(tmp)
+
+        if not os.path.isfile(brresFilepath):
+            self.report({"ERROR"}, "ABMatt did not produce a BRRES file. Check the console.")
+            return {'CANCELLED'}
+
         if(brresFilepath != filepath):
-            os.rename(brresFilepath,filepath)
+            os.replace(brresFilepath, filepath)
 
         return {'FINISHED'}
 
@@ -3138,12 +3601,19 @@ def merge_duplicate_flags(context):
     i = 0
     active = context.active_object
     bpy.ops.object.select_all(action='DESELECT')
-    
+
     objects=[ob.name for ob in bpy.context.view_layer.objects if ob.visible_get() and checkFlagInName001(ob.name)]
     meshes=[ob.data for ob in bpy.context.view_layer.objects if ob.visible_get() and checkFlagInName001(ob.name)]
-    if(active.name[-3:].isnumeric() and active.name[-4] == "."):
-        active.name = active.name[:-4]
-    activeName = active.name
+
+    # Track the active object by reference: the rename below can silently fail
+    # when the base name is taken, and the object may be merged away.
+    active_ref = active
+    if active is not None and active.name[-3:].isnumeric() and active.name[-4] == ".":
+        base = active.name[:-4]
+        # Only strip the suffix when the base name is free.
+        if base not in bpy.data.objects:
+            active.name = base
+
     while i < len(objects):
         objName = objects[i]
         duplicate_names = get_duplicated_names(objName)
@@ -3152,21 +3622,31 @@ def merge_duplicate_flags(context):
         if(objName[-3:].isnumeric() and objName[-4] == "."):
             obj1 = bpy.data.objects.get(objName)
             if(obj1):
-                obj1.name = objName[:-4]
-                obj1.data.name = objName[:-4]
+                base = objName[:-4]
+                if base not in bpy.data.objects:
+                    obj1.name = base
+                    obj1.data.name = base
         obj1 = bpy.data.objects.get(objName)
-        if(hasattr(obj1,"data")):
+        if(hasattr(obj1,"data") and obj1.data is not None):
             obj1.data.name = objName
-        # MeshName = meshes[i].name
-        # if(MeshName[-3:].isnumeric() and MeshName[-4] == "."):
-        #     meshes[i].name = MeshName[:-4]
         i=i+1
+
+    # Re-select the active object if it survived.
     try:
-        bpy.data.objects[activeName].select_set(True)
-        bpy.context.view_layer.objects.active = bpy.data.objects[activeName]
-    except ReferenceError:
-        pass
-        
+        if active_ref is not None and active_ref.name in bpy.data.objects:
+            active_ref.select_set(True)
+            bpy.context.view_layer.objects.active = active_ref
+    except (ReferenceError, KeyError, RuntimeError):
+        # Merged into another object; fall back to any survivor.
+        survivors = [ob for ob in bpy.context.view_layer.objects
+                     if ob.type == 'MESH' and checkFlagInName001(ob.name)]
+        if survivors:
+            try:
+                survivors[0].select_set(True)
+                bpy.context.view_layer.objects.active = survivors[0]
+            except (ReferenceError, RuntimeError):
+                pass
+
     return True
 
 class merge_duplicate_objects(bpy.types.Operator):
@@ -3784,19 +4264,24 @@ def update_scene_handler(scene):
 def load_file_handler(dummy):
     global theresAnUpdate
     global current_version, latest_version, prerelease_version
-    responseLatest = requests.get("https://api.github.com/repos/Gabriela-Orzechowska/Blender-MKW-Utilities/releases/latest")
-    responseVersions = requests.get("https://api.github.com/repos/Gabriela-Orzechowska/Blender-MKW-Utilities/releases")
-    prerelease = responseVersions.json()[0]["url"]
-    responseVersions = requests.get(prerelease)
-    prerelease_version = responseVersions.json()["tag_name"]
-    latest_version = responseLatest.json()["tag_name"]
 
-    if(get_prefs(bpy.context).updates_bool):
-        if(get_prefs(bpy.context).prerelease_bool):
-            if(prerelease_version != current_version):
+    # Network failures must not break loading a .blend.
+    try:
+        if get_prefs(bpy.context).updates_bool:
+            responseLatest = requests.get(GITHUB_API + "/releases/latest", timeout=5)
+            responseVersions = requests.get(GITHUB_API + "/releases", timeout=5)
+            prerelease = responseVersions.json()[0]["url"]
+            responseVersions = requests.get(prerelease, timeout=5)
+            prerelease_version = responseVersions.json()["tag_name"]
+            latest_version = responseLatest.json()["tag_name"]
+
+            if(get_prefs(bpy.context).prerelease_bool):
+                if(prerelease_version != current_version):
+                    theresAnUpdate = True
+            elif current_version != latest_version:
                 theresAnUpdate = True
-        elif current_version != latest_version:
-            theresAnUpdate = True
+    except Exception as exc:
+        print("[MKW Utilities] update check skipped:", exc)
 
     create_node_groups()
 
@@ -3934,8 +4419,24 @@ class ImportPrefs(bpy.types.Operator, ImportHelper):
 class PreferenceProperty(bpy.types.AddonPreferences):
     bl_idname = __name__
     #region preferences
-    updates_bool : BoolProperty(name="Check for updates", default=True)
+    updates_bool : BoolProperty(
+        name="Check for updates",
+        description=("Contact GitHub when a .blend file is opened to see if a "
+                     "newer release is available. Off by default"),
+        default=False)
     prerelease_bool : BoolProperty(name="Check for pre-release versions", default=False)
+
+    wszst_path : StringProperty(
+        name="Wiimms SZS Tools folder",
+        description=(
+            "Optional. Folder containing wszst/wkclt (or the wszst executable "
+            "itself). Leave blank to search PATH and the standard install "
+            "locations. Set this if Blender cannot find your installation"
+        ),
+        subtype='DIR_PATH',
+        default="",
+        update=lambda self, context: _on_wszst_path_changed(self, context),
+    )
 
     openScheme : BoolProperty(name="Custom KCL Flag Scheme")
 
@@ -3990,6 +4491,34 @@ class PreferenceProperty(bpy.types.AddonPreferences):
         row.operator("prefs.import")
         row.operator("prefs.export")
         col = layout.column()
+        toolsBox = col.box()
+        toolsBox.label(text="External Tools", icon='TOOL_SETTINGS')
+        toolsBox.prop(self, "wszst_path")
+        statusRow = toolsBox.row()
+        if wszstInstalled:
+            if _use_flatpak_spawn:
+                statusRow.label(text="Wiimms SZS Tools found on host (via flatpak-spawn)",
+                                icon='CHECKMARK')
+            else:
+                statusRow.label(text="Wiimms SZS Tools found: " + (_resolve_tool("wszst") or "?"),
+                                icon='CHECKMARK')
+        else:
+            statusRow.label(text="Wiimms SZS Tools not found", icon='ERROR')
+        sandbox = detect_sandbox()
+        if sandbox and not wszstInstalled:
+            warn = toolsBox.box()
+            warn.label(text="Blender is running as a %s package." % sandbox.capitalize(),
+                       icon='ERROR')
+            warn.label(text="It cannot see /usr/local, so WSZST looks missing")
+            warn.label(text="even when it is installed correctly.")
+            if sandbox == "flatpak":
+                warn.label(text="Grant access, then press Re-check:")
+                warn.label(text="flatpak override --user --filesystem=host org.blender.Blender")
+            else:
+                warn.label(text="Snap confinement cannot be relaxed this way.")
+                warn.label(text="Install Blender from blender.org or apt instead.")
+        toolsBox.operator("mkw.refresh_tools", icon='FILE_REFRESH')
+
         col.prop(self, "updates_bool")
         if(self.updates_bool):
             col.prop(self, "prerelease_bool")
@@ -4295,7 +4824,7 @@ def register_area():
         min= 0, 
         default= 0, 
         max=255,
-        description= "When 2 AREAs of same type a overlapping then the one\with higher priority is getting considered"
+        description= "When 2 AREAs of same type are overlapping then the one with higher priority is getting considered"
     )            
     bpy.types.Object.area_id = IntProperty(
         name = "CAME Index",
@@ -4424,8 +4953,11 @@ def create_node_groups():
     create_mirror_group(key="u",name="Mirror U")
     create_mirror_group(key="v",name="Mirror V")
 
-mynodescat = [ShaderNodeCategory("SH_TEV_STAGE", "Wii Nodes", items=[NodeItem("ShaderTEVGroup"),
-                                                                     NodeItem("IndirectShaderGroup")]),]
+if HAS_NODEITEMS and not BLENDER_40:
+    mynodescat = [ShaderNodeCategory("SH_TEV_STAGE", "Wii Nodes", items=[NodeItem("ShaderTEVGroup"),
+                                                                        NodeItem("IndirectShaderGroup")]),]
+else:
+    mynodescat = []
 
 from bl_ui import node_add_menu
 
@@ -4443,40 +4975,33 @@ class NODE_MT_category_wii(bpy.types.Menu):
 def NewNodeMenu(self, _context):
     self.layout.menu("NODE_MT_category_wii")
 
-classes = [remind_me_later,IndirectShaderGroup,ShaderTEVGroup,get_vertex_color,toggle_face_orientation,add_vertex_col,PreferenceProperty,add_mirrorUV,get_flag_back,add_mirrorU,add_trickable,add_reject, add_mirrorV, ShaderUtilities, MyProperties, restore_specular_metalic, ShaderGroupUtilities, export_minimap, set_alpha_hashed, KMPUtilities, remove_duplicate_materials, KCLSettings, KCLUtilities,ExportPrefs,ImportPrefs,ExportOBJKCL, AREAUtilities,CAMEUtilities, RouteUtilities, MaterialUtilities,add_blight, scene_setup, keyframes_to_route, openWSZSTPage, openIssuePage, timeline_to_route, set_alpha_blend, set_alpha_clip, remove_specular_metalic, create_camera, kmp_came, apply_kcl_flag, cursor_kmp, import_kcl_file, kmp_gobj, kmp_area, kmp_c_cube_area, kmp_c_cylinder_area, load_kmp_area, load_kmp_enemy, export_kcl_file, openGithub, merge_duplicate_objects, export_autodesk_dae,NODE_MT_category_wii]
+classes = [refresh_wszst,remind_me_later,IndirectShaderGroup,ShaderTEVGroup,get_vertex_color,toggle_face_orientation,add_vertex_col,PreferenceProperty,add_mirrorUV,get_flag_back,add_mirrorU,add_trickable,add_reject, add_mirrorV, ShaderUtilities, MyProperties, restore_specular_metalic, ShaderGroupUtilities, export_minimap, set_alpha_hashed, KMPUtilities, remove_duplicate_materials, KCLSettings, KCLUtilities,ExportPrefs,ImportPrefs,ExportOBJKCL, AREAUtilities,CAMEUtilities, RouteUtilities, MaterialUtilities,add_blight, scene_setup, keyframes_to_route, openWSZSTPage, openIssuePage, timeline_to_route, set_alpha_blend, set_alpha_clip, remove_specular_metalic, create_camera, kmp_came, apply_kcl_flag, cursor_kmp, import_kcl_file, kmp_gobj, kmp_area, kmp_c_cube_area, kmp_c_cylinder_area, load_kmp_area, load_kmp_enemy, export_kcl_file, openGithub, merge_duplicate_objects, export_autodesk_dae,NODE_MT_category_wii]
  
-wszstInstalled = False
 addon_keymaps = []
+
+
 def register():
     global wszstInstalled
-    wszst = os.popen('wszst version').read()
-    if(wszst.startswith("wszst: Wiimms SZS Tool")):
-        wszstInstalled = True
-    script_file = os.path.normpath(__file__)
-    directory = os.path.dirname(script_file)
-    if directory.endswith("Blender-KMP-Utilities"):
-        
-        register_area()
-        register_came()
-        register_scene()
-        for cls in classes:
-            bpy.utils.register_class(cls)
-        bpy.app.handlers.frame_change_post.append(frame_change_handler)
-        bpy.app.handlers.load_post.append(load_file_handler)
-        bpy.app.handlers.depsgraph_update_post.append(update_scene_handler)
-        bpy.types.TOPBAR_MT_file_export.append(export_autodesk_dae_button)
-        bpy.types.TOPBAR_MT_file_export.append(export_minimap_button)
-        if BLENDER_40:
-            bpy.types.NODE_MT_shader_node_add_all.append(NewNodeMenu)
-        else:
-            register_node_categories("WII_NODES", mynodescat);
-        if(wszstInstalled):
-            bpy.types.TOPBAR_MT_file_export.append(export_kcl_button)
-            bpy.types.TOPBAR_MT_file_import.append(import_kcl_button)
-        bpy.types.Scene.kmpt = PointerProperty(type= MyProperties)
-        
-    else:
-        bpy.utils.register_class(BadPluginInstall)
+    wszstInstalled = _detect_wszst()
+
+    register_area()
+    register_came()
+    register_scene()
+    for cls in classes:
+        bpy.utils.register_class(cls)
+    bpy.app.handlers.frame_change_post.append(frame_change_handler)
+    bpy.app.handlers.load_post.append(load_file_handler)
+    bpy.app.handlers.depsgraph_update_post.append(update_scene_handler)
+    bpy.types.TOPBAR_MT_file_export.append(export_autodesk_dae_button)
+    bpy.types.TOPBAR_MT_file_export.append(export_minimap_button)
+    if BLENDER_40:
+        bpy.types.NODE_MT_shader_node_add_all.append(NewNodeMenu)
+    elif HAS_NODEITEMS:
+        register_node_categories("WII_NODES", mynodescat)
+    if(wszstInstalled):
+        bpy.types.TOPBAR_MT_file_export.append(export_kcl_button)
+        bpy.types.TOPBAR_MT_file_import.append(import_kcl_button)
+    bpy.types.Scene.kmpt = PointerProperty(type= MyProperties)
 
     wm = bpy.context.window_manager
     kc = wm.keyconfigs.addon
@@ -4490,31 +5015,57 @@ def register():
         addon_keymaps.append((km, kmi))
  
 def unregister():
-    for cls in classes:
-        bpy.utils.unregister_class(cls)
-    
+    for cls in reversed(classes):
+        try:
+            bpy.utils.unregister_class(cls)
+        except (RuntimeError, ValueError):
+            pass
+
     try:
         bpy.utils.unregister_class(BadPluginInstall)
-    except RuntimeError:
+    except (RuntimeError, ValueError):
         pass
-    bpy.app.handlers.depsgraph_update_post.remove(update_scene_handler)
-    bpy.app.handlers.frame_change_post.remove(frame_change_handler)
-    bpy.app.handlers.load_post.remove(load_file_handler)
-    bpy.types.TOPBAR_MT_file_export.remove(export_autodesk_dae_button)
-    bpy.types.TOPBAR_MT_file_export.remove(export_minimap_button)
+
+    for handler_list, fn in (
+        (bpy.app.handlers.depsgraph_update_post, update_scene_handler),
+        (bpy.app.handlers.frame_change_post, frame_change_handler),
+        (bpy.app.handlers.load_post, load_file_handler),
+    ):
+        try:
+            handler_list.remove(fn)
+        except ValueError:
+            pass
+
+    for menu, fn in (
+        (bpy.types.TOPBAR_MT_file_export, export_autodesk_dae_button),
+        (bpy.types.TOPBAR_MT_file_export, export_minimap_button),
+        (bpy.types.TOPBAR_MT_file_export, export_kcl_button),
+        (bpy.types.TOPBAR_MT_file_import, import_kcl_button),
+    ):
+        try:
+            menu.remove(fn)
+        except (RuntimeError, ValueError):
+            pass
+
     if BLENDER_40:
-        bpy.types.NODE_MT_shader_node_add_all.remove(NewNodeMenu)
-    else:
-        unregister_node_categories("WII_NODES");
-    try:
-        bpy.types.TOPBAR_MT_file_export.remove(export_kcl_button)
-        bpy.types.TOPBAR_MT_file_import.remove(import_kcl_button)
-    except RuntimeError:
-        pass
-    del bpy.types.Scene.kmpt
-    
+        try:
+            bpy.types.NODE_MT_shader_node_add_all.remove(NewNodeMenu)
+        except (RuntimeError, ValueError):
+            pass
+    elif HAS_NODEITEMS:
+        try:
+            unregister_node_categories("WII_NODES")
+        except (RuntimeError, KeyError):
+            pass
+
+    if hasattr(bpy.types.Scene, "kmpt"):
+        del bpy.types.Scene.kmpt
+
     for km, kmi in addon_keymaps:
-        km.keymap_items.remove(kmi)
+        try:
+            km.keymap_items.remove(kmi)
+        except (RuntimeError, ValueError):
+            pass
     addon_keymaps.clear()
 
  
