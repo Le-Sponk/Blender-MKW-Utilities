@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "mkw_utilities"
-version = "1.11.0"
+version = "1.12.0"
 name = "Mario Kart Wii Utilities"
 tagline = "Tools for creating Mario Kart Wii custom courses"
 maintainer = "Gabriela_ (unofficial update)"

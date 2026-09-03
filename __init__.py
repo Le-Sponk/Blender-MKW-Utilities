@@ -2,7 +2,7 @@
 bl_info = {
     "name" : "Mario Kart Wii Utilities",
     "author" : "Gabriela_ (unofficial update)",
-    "version" : (1, 11, 0),
+    "version" : (1, 12, 0),
     "blender" : (3, 1, 0),
     "description" : "Tools for creating Mario Kart Wii custom courses (KMP/KCL)",
     "location" : "View3d > Tool",
