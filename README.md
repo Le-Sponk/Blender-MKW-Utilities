@@ -40,6 +40,57 @@ and press **Re-check for WSZST**.
 
 Minimap BRRES export additionally requires [ABMatt](https://github.com/Robert-N7/abmatt).
 
+### Collada (.dae) export
+
+`File > Export > Autodesk Collada (.dae)` has two methods:
+
+- **Autodesk FbxConverter** (default) - exports FBX and converts it with the
+  bundled converter. This is the original behaviour and is used automatically
+  when the converter is present, which in practice means Windows.
+- **Built-in** - writes the Collada file directly, with no external tools.
+  Used automatically when the converter is unavailable, so DAE export works on
+  Linux and macOS, and on Blender 5.x where Blender's own Collada exporter was
+  removed.
+
+Geometry is written as `<triangles>`, one group per material, which is what
+ABMatt and BrawlCrate expect. A model with several materials produces several
+MDL0 materials rather than one.
+
+**Copy Textures** (built-in method) writes each material's image texture next
+to the `.dae`, under the filename the Collada file references, so BrawlCrate
+resolves them on import. This replaces the *Texture Options > Copy* setting
+from Blender's old Collada exporter.
+
+Textures are found by following a material's node tree to the image feeding
+Base Color, falling back to any image texture node. Packed and generated
+images are written out too.
+
+### Blender's `.001` suffixes
+
+Blender appends `.001`, `.002` and so on whenever a name is already taken.
+This shows up in two places:
+
+- **Trailing**, on a datablock name: `d64_road.png.001`
+- **Interior**, in a filename on disk: `d64_road.png.001.png` - written when a
+  texture is saved or copied through Blender while the target name exists
+
+Either form carried into an export produces a broken texture in BrawlCrate,
+such as `d64_road.png.001`, which then shows the wrong texture in game. Both
+forms are stripped.
+
+Exports strip these suffixes automatically:
+
+- Image datablocks that point at the same file on disk collapse into a single
+  Collada `<image>` and a single copied texture.
+- A texture is copied out under its cleaned name, so `d64_road.png.001.png`
+  on disk is written and referenced as `d64_road.png`.
+- Material, object and texture names are written without the suffix, in both
+  the Collada and OBJ exporters.
+
+Your .blend file is not modified. If two genuinely different files share a
+name once the suffix is removed, they are kept apart and the export reports
+which one was renamed.
+
 ---
 
 ## Changes in this fork

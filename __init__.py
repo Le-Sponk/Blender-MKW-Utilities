@@ -46,9 +46,15 @@ from bpy_extras.io_utils import (
 )
 from bpy.app.handlers import persistent
 from . import export_obj
+from . import export_dae
 
-# Pre-4.0 node menu system. Deprecated and scheduled for removal, so import
-# defensively; 4.0+ uses NODE_MT_shader_node_add_all instead.
+# Submodules stay in sys.modules across a disable/enable, so an in-place
+# update would otherwise keep running the old code until Blender restarts.
+import importlib as _importlib
+export_obj = _importlib.reload(export_obj)
+export_dae = _importlib.reload(export_dae)
+
+# Pre-4.0 node menu system. 4.0+ uses NODE_MT_shader_node_add_all.
 try:
     from nodeitems_utils import NodeItem, register_node_categories, unregister_node_categories
     from nodeitems_builtins import ShaderNodeCategory
@@ -72,7 +78,6 @@ BLENDER_40 = _V >= (4, 0)
 BLENDER_41 = _V >= (4, 1)
 BLENDER_42 = _V >= (4, 2)
 BLENDER_50 = _V >= (5, 0)
-
 
 # ---------------------------------------------------------------------------
 # Compatibility helpers (Blender 3.x -> 5.x)
@@ -100,7 +105,6 @@ def _principled_set(mat, socket_name, value):
         return False
     return True
 
-
 def _principled_node(mat):
     """Find the Principled BSDF node by type rather than by name."""
     if not mat or not mat.use_nodes or not mat.node_tree:
@@ -110,10 +114,8 @@ def _principled_node(mat):
             return n
     return None
 
-
-# Renamed in Blender 4.0.
+# Renamed in 4.0.
 SPECULAR_SOCKET = 'Specular IOR Level' if BLENDER_40 else 'Specular'
-
 
 def _detect_abmatt():
     """Return True if the ABMatt CLI is available."""
@@ -124,16 +126,12 @@ def _detect_abmatt():
     except (OSError, subprocess.SubprocessError):
         return False
 
-
 # ---------------------------------------------------------------------------
 # External tool discovery (Wiimms SZS Tools / ABMatt)
 # ---------------------------------------------------------------------------
-#
-# Blender launched from a desktop icon / Start menu does not inherit the login
-# shell's PATH, so an installed `wszst` is often invisible to subprocess. Search
-# PATH and the standard install locations, and allow an explicit folder to be
-# set in the add-on preferences.
-
+# Blender launched from a desktop icon does not inherit the login shell's PATH,
+# so an installed wszst is often invisible to subprocess. Search PATH, the
+# standard install locations, and a folder set in the add-on preferences.
 
 def _build_tool_search_dirs():
     """Standard locations to look for wszst/wkclt/abmatt.
@@ -162,8 +160,7 @@ def _build_tool_search_dirs():
                  os.path.join(root, "usr", "bin"),
                  os.path.join(root, "bin")]
 
-    # Windows: resolve program-files and the system drive from the environment
-    # rather than assuming C:.
+    # Windows: resolve from the environment rather than assuming C:.
     for var in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"):
         base = os.environ.get(var)
         if base:
@@ -183,7 +180,6 @@ def _build_tool_search_dirs():
         dirs += [os.path.join(localappdata, "Programs", "szs"),
                  os.path.join(localappdata, "Programs", "Wiimm", "SZS")]
 
-    # De-duplicate while preserving order
     seen = set()
     result = []
     for d in dirs:
@@ -192,9 +188,7 @@ def _build_tool_search_dirs():
             result.append(d)
     return result
 
-
 _TOOL_SEARCH_DIRS = _build_tool_search_dirs()
-
 
 def detect_sandbox():
     """Return 'flatpak', 'snap' or "" describing how Blender is confined.
@@ -207,7 +201,6 @@ def detect_sandbox():
     if os.environ.get("SNAP") or os.environ.get("SNAP_NAME"):
         return "snap"
     return ""
-
 
 def _flatpak_spawn_works():
     """True if we can run host commands via flatpak-spawn --host."""
@@ -222,10 +215,8 @@ def _flatpak_spawn_works():
     except (OSError, subprocess.SubprocessError):
         return False
 
-
 _tool_cache = {}
 _use_flatpak_spawn = False
-
 
 def tool_command(name):
     """Return an argv prefix that will run tool `name`.
@@ -240,7 +231,6 @@ def tool_command(name):
 
 wszstInstalled = False
 
-
 def _user_tool_dir():
     """Optional user-configured folder from add-on preferences."""
     try:
@@ -251,7 +241,6 @@ def _user_tool_dir():
     except Exception:
         pass
     return ""
-
 
 def _resolve_tool(name, use_cache=True):
     """Return an absolute path to `name`, or "" if it cannot be found.
@@ -295,7 +284,6 @@ def _resolve_tool(name, use_cache=True):
     _tool_cache[name] = found
     return found
 
-
 def _detect_wszst(use_cache=True):
     """Check for the Wiimms SZS toolset."""
     global _use_flatpak_spawn
@@ -322,12 +310,10 @@ def _detect_wszst(use_cache=True):
     _use_flatpak_spawn = False
     return False
 
-
 def wszst_available():
     """Cached availability, safe to call on every panel redraw."""
     global wszstInstalled
     return wszstInstalled
-
 
 def refresh_tool_detection():
     """Re-run detection, clearing caches. Returns the new wszst state."""
@@ -335,7 +321,6 @@ def refresh_tool_detection():
     _tool_cache.clear()
     wszstInstalled = _detect_wszst(use_cache=False)
     return wszstInstalled
-
 
 def _on_wszst_path_changed(self, context):
     """Property update callback."""
@@ -349,12 +334,10 @@ def _on_wszst_path_changed(self, context):
         bpy.types.TOPBAR_MT_file_export.append(export_kcl_button)
         bpy.types.TOPBAR_MT_file_import.append(import_kcl_button)
 
-
 def _mesh_calc_normals_split(me):
     """Mesh.calc_normals_split() was removed in Blender 4.1."""
     if not BLENDER_41 and hasattr(me, "calc_normals_split"):
         me.calc_normals_split()
-
 
 def _check_axis_conversion_compat(op):
     """Public-API equivalent of bpy_extras.io_utils._check_axis_conversion."""
@@ -364,7 +347,6 @@ def _check_axis_conversion_compat(op):
 lastselection = []
 setting1users = ["A2", "A3", "A6", "A8", "A9", "A10"]
 setting2users = ["A3", "A6", "A10"]
-
 
 def updateCame(self, context):
     
@@ -900,7 +882,6 @@ class openWSZSTPage(bpy.types.Operator):
         webbrowser.get().open('https://szs.wiimm.de/download.html')
         return {'FINISHED'}
 
-
 class refresh_wszst(bpy.types.Operator):
     bl_idname = "mkw.refresh_tools"
     bl_label = "Re-check for WSZST"
@@ -1037,7 +1018,6 @@ class KCLSettings(bpy.types.Panel):
         layout.prop(mytool, "kcl_applyMaterial")
         layout.prop(mytool, "kcl_applyName")
         layout.prop(mytool, "kcl_autoSeparate")
-
 
 class KCLUtilities(bpy.types.Panel):
     global finalFlag, kcl_typeATypes, wszstInstalled
@@ -1341,7 +1321,6 @@ class MaterialUtilities(bpy.types.Panel):
         layout.operator("kmpt.metalic")
         layout.operator("kmpt.specular")
 
-
 class ShaderUtilities(bpy.types.Panel):
     bl_label = "Shader Utilities"
     bl_idname = "MKW_PT_Shader"
@@ -1442,7 +1421,6 @@ class set_alpha_blend(bpy.types.Operator):
                                 if not shader.inputs['Alpha'].links:
                                     mat.node_tree.links.new(shader.inputs['Alpha'], node.outputs['Alpha'])
         return {'FINISHED'}
-
 
 class set_alpha_hashed(bpy.types.Operator):
     bl_idname = "kmpt.hashed"
@@ -1567,16 +1545,12 @@ class add_vertex_col(bpy.types.Operator):
                                 links.new(alphaMathNode.inputs[1], vertexNode.outputs['Alpha'])
                                 links.new(principled.inputs['Alpha'], alphaMathNode.outputs['Value'])
 
-
                             else:
                                 self.report({"WARNING"}, "Couldn't find a Image Texture connected to Principled BSDF: {0}".format(mat.name))
                         else:
                             self.report({"WARNING"}, "Couldn't find any Image Texture node: {0}".format(mat.name))
                                         
         return {'FINISHED'}
-
-
-
 
 class add_mirrorUV(bpy.types.Operator):
     bl_idname = "mat.addmirror"
@@ -1610,7 +1584,6 @@ class add_mirrorV(bpy.types.Operator):
         test_node.node_tree = bpy.data.node_groups[my_group.name]
         test_node.location = (-500,0)
         return {'FINISHED'}
-
 
 def create_mirror_group(key="uv",name='Mirror UV'):
     if(name in bpy.data.node_groups):
@@ -1786,8 +1759,6 @@ class ShaderTEVGroup(bpy.types.ShaderNodeCustomGroup):
         link(scaleNode.inputs[1],biasNode.outputs[0])
         link(group_output.inputs[0],scaleNode.outputs[0])
 
-
-
     def draw_buttons(self, context, layout):
         column=layout.column()
         column.prop(self, 'Operation', text='Operation')
@@ -1957,7 +1928,6 @@ class IndirectShaderGroup(bpy.types.ShaderNodeCustomGroup):
         rotateMatrix.name = 'RotateNode'
         rotateMatrix.label = 'RotateNode'
 
-
         link = self.node_tree.links.new
         link(group_inputs.outputs['Indirect Color'], splitColors.inputs['Color'])
         link(splitColors.outputs['Blue'], fixBlue.inputs[0])
@@ -2041,15 +2011,12 @@ class IndirectShaderGroup(bpy.types.ShaderNodeCustomGroup):
         row.prop(self, 'TransformX', text="S")
         row.prop(self, 'TransformY', text="T")
 
-
     def copy(self, node):
         self.node_tree=node.node_tree.copy()
 
     def free(self):
         bpy.data.node_groups.remove(self.node_tree, do_unlink=True)
         
-
-
 
 class kmp_came(bpy.types.Operator):
     bl_idname = "kmpt.came"
@@ -2217,7 +2184,6 @@ class kmp_came(bpy.types.Operator):
                 nextCameId = objectsToExport.index(object.came_next) + mytool.kmp_cameOffset
             id = id + 1            
             nextRouteID = object.came_route
-
 
             dataValues = [
                 str(j).zfill(2),
@@ -2394,7 +2360,6 @@ class create_camera(bpy.types.Operator):
         vp.name = vpName
         vp.is_view_point = True
 
-
         bpy.ops.object.camera_add(align='VIEW', location=camePosition)
         
         bpy.ops.transform.resize(value=(scale/10,scale/10,scale/10))
@@ -2467,7 +2432,6 @@ def get_duplicate_materials(og_material):
     
     return duplicate_materials
 
-
 def remove_all_duplicate_materials():
     i = 0
     while i < len(bpy.data.materials):
@@ -2488,7 +2452,6 @@ def remove_all_duplicate_materials():
             
         i = i+1
     
-
 
 finalFlag = ''
 properFlag = ''
@@ -2538,7 +2501,6 @@ class apply_kcl_flag(bpy.types.Operator):
             separated = [i for i in selection if i not in oldSelection]
             bpy.context.view_layer.objects.active = context.selected_objects[0]
             selection.append(context.selected_objects[0])
-
 
         variantPropName = "kclVariant" + mytool.kcl_masterType
         z = '000'
@@ -2770,7 +2732,6 @@ def updateBit(operator,context,key="ltr"):
         i.name = i.name[:-4] + newFlag.upper()
         i.data.name = i.name
 
-
     if(wasInEditMode):
         bpy.ops.object.mode_set(mode='OBJECT')
         bpy.ops.object.select_all(action='DESELECT')
@@ -2821,7 +2782,6 @@ def updateBit(operator,context,key="ltr"):
                 mat.diffuse_color = (color[0],color[1],color[2],1)
         context.active_object.data.materials.clear()
         context.active_object.data.materials.append(mat)
-
 
 class add_blight(bpy.types.Operator):
     bl_idname = "kcl.addblight"
@@ -2886,7 +2846,6 @@ def decodeFlag(bareFlag):
     softWall = int(binary[0],2)
 
     return kclType,variant,shadow,trickable,drivable,softWall,depth
-
 
 def getSchemeColor(context,kclType,trickable,drivable,shadow):
     global kcl_typeATypes, kcl_wallTypes
@@ -2963,7 +2922,6 @@ class export_kcl_file(bpy.types.Operator):
     kclEncodeRotate : FloatVectorProperty(name="Rotate", default=(0.0,0.0,0.0), min=-1000000,max=1000000)
     kclEncodeTranslate : FloatVectorProperty(name="Translate", default=(0.0,0.0,0.0), min=-1000000,max=1000000)
 
-
     kclSetKCL_BITS : IntProperty(name="KCL_BITS", default=0, min=0,max=20,description="0 to disable. This constant defines the number of bits used for the hash part of the octree. The result is, that the world will be divided in 2^bits base cubes. The number of bits is sometimes reduced because of technical limits")
     kclSetKCL_BLOW : IntProperty(name="KCL_BLOW", default=400, min=0,max=10000,description="For the octree, the world is divided into many cubes of equal size, normally 512*512*512 units. For collisions of an object (eg. driver or item) the octree is traversed to find a list with important triangles (faces) for the current positions. It is important, that near triagles of the neighbor cubes are also included into the triangle list")
     kclSetKCL_MAX : FloatVectorProperty(name="KCL_MAX", default=(0,0,0),description="KCL_MAX is a vector value. If a coordinate is set, it is used as maximal coordinate for the collision detection. The default is the maximum of all triangle points. However, this value is only used for the base cube calculations (number and size). The real upper border is then: MIN + N_CUBES * CUBE_SIZE.")
@@ -3027,7 +2985,6 @@ class export_kcl_file(bpy.types.Operator):
                     change_ext = True
 
         return (change_ext or change_axis)
-
 
     def draw(self,context):
         layout = self.layout
@@ -3122,8 +3079,8 @@ class export_kcl_file(bpy.types.Operator):
             
             return {'CANCELLED'}
 
-        # Report what is being written. Unflagged objects are dropped, which
-        # otherwise silently produces a near-empty file.
+        # Unflagged objects are dropped, which otherwise silently produces a
+        # near-empty file.
         _all_meshes = [o for o in bpy.data.objects if o.type == "MESH"]
         _skipped = [o.name for o in _all_meshes if o not in objectsToExport]
         _n_tris = 0
@@ -3215,7 +3172,7 @@ class export_kcl_file(bpy.types.Operator):
         script_file = os.path.normpath(__file__)
         directory = os.path.dirname(script_file)
         if (self.kclExportUnBeanCorner == "LOWER" or self.kclExportUnBeanCorner == "BOTH"):
-            # os.path.join keeps the separator correct on all platforms.
+
             script_path = os.path.join(directory, "lower-walls.txt")
             if not os.path.isfile(script_path):
                 self.report({"ERROR"}, "lower-walls.txt is missing from the plugin folder; reinstall the add-on.")
@@ -3320,7 +3277,6 @@ class import_kcl_file(bpy.types.Operator):
         if(bpy.context.active_object):
             bpy.ops.object.mode_set(mode='OBJECT')
 
-
         #Decode KCL to OBJ
         filedata = ""
         currentTime = time.time() #Get the current time, add to filepath
@@ -3373,7 +3329,6 @@ class import_kcl_file(bpy.types.Operator):
             #Assign mat
             obj.data.materials.append(mat)
 
-
         #Delete temp file
         if os.path.exists(objFilepath):
             os.remove(objFilepath)
@@ -3398,31 +3353,118 @@ class export_autodesk_dae(bpy.types.Operator, ExportHelper):
                                                                         ('COPY', "Copy", "")])
     daeExportSelection : BoolProperty(name="Selection only", default = False)
     daeExportCollection : BoolProperty(name="Active collection", default = False)
-    daeExportScale : FloatProperty(name="Scale", default = 1)
+    daeExportScale : FloatProperty(name="Scale", default = 100)
+    daeExportCopyTextures : BoolProperty(
+        name="Copy Textures",
+        description=("Write the model's image textures next to the .dae, using "
+                     "the names the Collada file references"),
+        default=True)
+    daeExportMethod : EnumProperty(
+        name="Method",
+        description="How the Collada file is produced",
+        items=[
+            ('AUTO', "Autodesk FbxConverter",
+             "Export FBX and convert it with the bundled Autodesk "
+             "FbxConverter. Windows only; falls back to Built-in when the "
+             "converter is unavailable"),
+            ('BUILTIN', "Built-in",
+             "Write the Collada file directly. Works on every platform and "
+             "needs no external tools"),
+        ],
+        default='AUTO')
 
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "daeExportMethod")
+        if self.daeExportMethod == 'AUTO' and not fbx_converter_path():
+            box = layout.box()
+            box.label(text="FbxConverter is unavailable here.", icon='INFO')
+            box.label(text="The built-in writer will be used instead.")
+        layout.prop(self, "daeExportSelection")
+        layout.prop(self, "daeExportCollection")
+        layout.prop(self, "daeExportScale")
+        if self.daeExportMethod == 'AUTO':
+            layout.prop(self, "daeExportPathMode")
+        else:
+            layout.prop(self, "daeExportCopyTextures")
 
     def execute(self, context):
         filepath = self.filepath
-        bpy.ops.export_scene.fbx(filepath = filepath, use_selection = self.daeExportSelection,  
-                                 filter_glob='*.dae', use_active_collection = self.daeExportCollection, 
-                                 global_scale = self.daeExportScale, apply_scale_options='FBX_SCALE_NONE', 
-                                 object_types={'MESH','ARMATURE'}, use_mesh_modifiers=True, path_mode=self.daeExportPathMode, 
-                                 bake_anim=False, add_leaf_bones=False)
-        dae_convert(filepath=filepath)
+
+        if self.daeExportMethod == 'AUTO' and fbx_converter_path():
+            bpy.ops.export_scene.fbx(filepath = filepath, use_selection = self.daeExportSelection,  
+                                     filter_glob='*.dae', use_active_collection = self.daeExportCollection, 
+                                     global_scale = self.daeExportScale, apply_scale_options='FBX_SCALE_NONE', 
+                                     object_types={'MESH','ARMATURE'}, use_mesh_modifiers=True, path_mode=self.daeExportPathMode, 
+                                     bake_anim=False, add_leaf_bones=False)
+            try:
+                dae_convert(filepath=filepath)
+            except Exception as exc:
+                self.report({'ERROR'}, "FbxConverter failed: %s" % exc)
+                return {'CANCELLED'}
+            return {'FINISHED'}
+
+        objects = dae_source_objects(context, self.daeExportSelection,
+                                     self.daeExportCollection)
+        if not objects:
+            self.report({'ERROR_INVALID_INPUT'},
+                        "Nothing to export. No mesh objects matched.")
+            return {'CANCELLED'}
+
+        try:
+            meshes, tris, textures, conflicts = export_dae.write_dae(
+                filepath, objects, global_scale=self.daeExportScale,
+                copy_textures=self.daeExportCopyTextures)
+        except Exception as exc:
+            self.report({'ERROR'}, "Collada export failed: %s" % exc)
+            return {'CANCELLED'}
+
+        if not meshes:
+            self.report({'ERROR_INVALID_INPUT'},
+                        "Nothing to export. Selected objects have no faces.")
+            return {'CANCELLED'}
+
+        message = "Collada export: %d object(s), %d triangle(s)" % (meshes, tris)
+        if self.daeExportCopyTextures:
+            message += ", %d texture(s)" % len(textures)
+        self.report({'INFO'}, message)
+
+        if conflicts:
+            self.report(
+                {'WARNING'},
+                "Renamed to avoid a texture name clash: "
+                + ", ".join(conflicts[:5])
+                + ("..." if len(conflicts) > 5 else ""))
         return {'FINISHED'}
 
-def dae_convert(filepath):
-    """Convert an FBX to COLLADA via the bundled Autodesk FbxConverter.
+def dae_source_objects(context, selection_only, active_collection):
+    """Mesh objects a Collada export should include."""
+    if active_collection:
+        pool = context.collection.all_objects
+    else:
+        pool = context.scene.objects
+    objects = [ob for ob in pool if ob.type == 'MESH']
+    if selection_only:
+        objects = [ob for ob in objects if ob.select_get()]
+    return objects
 
-    The converter is Windows-only; raises RuntimeError elsewhere.
-    """
-    script_file = os.path.normpath(__file__)
-    directory = os.path.dirname(script_file)
+def fbx_converter_path():
+    """Absolute path to the bundled Autodesk FbxConverter, or None."""
+    directory = os.path.dirname(os.path.normpath(__file__))
     converter = os.path.join(directory, "bin", "FbxConverter.exe")
-    if not os.path.isfile(converter):
+    return converter if os.path.isfile(converter) else None
+
+def dae_convert(filepath):
+    """Convert an FBX to COLLADA in place via the bundled Autodesk FbxConverter.
+
+    The converter is a Windows binary. Callers should check
+    ``fbx_converter_path()`` first and use ``export_dae`` when it returns None.
+    """
+    converter = fbx_converter_path()
+    if converter is None:
         raise RuntimeError(
-            "FbxConverter.exe not found (bundled Windows-only tool). "
-            "Autodesk Collada export is not available on this platform."
+            "FbxConverter.exe not found. It is a Windows-only tool; use the "
+            "Built-in export method instead."
         )
     curTime = str(time.time() / 2)
     daeFile = filepath[:-4] + curTime + ".dae"
@@ -3462,15 +3504,27 @@ class export_minimap(bpy.types.Operator, ExportHelper):
         brresName = name + ".brres"
         brresFilepath = os.path.join(directory, brresName)
 
-        # ABMatt accepts DAE or OBJ. FbxConverter.exe is Windows-only and
-        # Collada export was removed in Blender 5.0, so fall back to OBJ,
-        # which is available on every platform and version.
-        converter = os.path.join(os.path.dirname(os.path.normpath(__file__)),
-                                 "bin", "FbxConverter.exe")
-        use_fbx = os.path.isfile(converter)
+        # ABMatt fails with an AttributeError on meshes with no material.
+        if self.exportSelection:
+            candidates = [o for o in context.selected_objects if o.type == 'MESH']
+        elif self.exportCollection:
+            candidates = [o for o in context.collection.objects if o.type == 'MESH']
+        else:
+            candidates = [o for o in context.scene.objects if o.type == 'MESH']
+        missing = [o.name for o in candidates
+                   if not any(s.material for s in o.material_slots)]
+        if missing:
+            self.report(
+                {"ERROR"},
+                "ABMatt requires every exported mesh to have a material. "
+                "Missing on: " + ", ".join(missing[:5])
+                + ("..." if len(missing) > 5 else ""))
+            return {'CANCELLED'}
 
-        if use_fbx:
-            interFilepath = os.path.join(directory, name + curTime + ".dae")
+        # ABMatt accepts DAE or OBJ. Prefer the bundled Autodesk converter
+        # where it exists, otherwise write Collada directly.
+        interFilepath = os.path.join(directory, name + curTime + ".dae")
+        if fbx_converter_path():
             bpy.ops.export_scene.fbx(filepath = interFilepath, use_selection = self.exportSelection, filter_glob='*.dae', use_active_collection = self.exportCollection, global_scale = self.exportScale, apply_scale_options='FBX_SCALE_NONE', object_types={'MESH'}, use_mesh_modifiers=True, bake_anim=False)
             try:
                 dae_convert(filepath=interFilepath)
@@ -3480,37 +3534,21 @@ class export_minimap(bpy.types.Operator, ExportHelper):
                     os.remove(interFilepath)
                 return {'CANCELLED'}
         else:
-            interFilepath = os.path.join(directory, name + curTime + ".obj")
-
-            # ABMatt cannot pack a mesh with no material; it fails with an
-            # AttributeError on NoneType. Report it clearly instead.
-            if self.exportSelection:
-                candidates = [o for o in context.selected_objects if o.type == 'MESH']
-            elif self.exportCollection:
-                candidates = [o for o in context.collection.objects if o.type == 'MESH']
-            else:
-                candidates = [o for o in context.scene.objects if o.type == 'MESH']
-            missing = [o.name for o in candidates
-                       if not any(s.material for s in o.material_slots)]
-            if missing:
-                self.report(
-                    {"ERROR"},
-                    "ABMatt requires every exported mesh to have a material. "
-                    "Missing on: " + ", ".join(missing[:5])
-                    + ("..." if len(missing) > 5 else ""))
+            objects = dae_source_objects(context, self.exportSelection,
+                                         self.exportCollection)
+            if not objects:
+                self.report({"ERROR_INVALID_INPUT"},
+                            "Nothing to export. No mesh objects matched.")
                 return {'CANCELLED'}
-
-            # ABMatt requires triangulated geometry.
-            bpy.ops.wm.obj_export(
-                filepath=interFilepath,
-                export_selected_objects=self.exportSelection,
-                global_scale=self.exportScale,
-                export_materials=True,
-                export_normals=True,
-                export_uv=True,
-                export_triangulated_mesh=True,
-                apply_modifiers=True,
-            )
+            try:
+                export_dae.write_dae(interFilepath, objects,
+                                     global_scale=self.exportScale,
+                                     copy_textures=True)
+            except Exception as exc:
+                self.report({"ERROR"}, "Collada export failed: %s" % exc)
+                if os.path.isfile(interFilepath):
+                    os.remove(interFilepath)
+                return {'CANCELLED'}
 
         abmatt_cmd = tool_command("abmatt")
         subprocess.run(abmatt_cmd + ["convert", interFilepath, "to", brresFilepath, "-o"], check=False)
@@ -3551,7 +3589,6 @@ def join_duplicate_objects(main_object, duplicate_object):
         obj1.select_set(True)
         bpy.ops.object.join() 
         bpy.ops.object.select_all(action='DESELECT')
-
 
 def get_duplicated_names(original_name):
     common_name = original_name
@@ -3605,8 +3642,8 @@ def merge_duplicate_flags(context):
     objects=[ob.name for ob in bpy.context.view_layer.objects if ob.visible_get() and checkFlagInName001(ob.name)]
     meshes=[ob.data for ob in bpy.context.view_layer.objects if ob.visible_get() and checkFlagInName001(ob.name)]
 
-    # Track the active object by reference: the rename below can silently fail
-    # when the base name is taken, and the object may be merged away.
+    # Track by reference: the rename below silently fails when the base name
+    # is taken, and the object may be merged away.
     active_ref = active
     if active is not None and active.name[-3:].isnumeric() and active.name[-4] == ".":
         base = active.name[:-4]
@@ -3631,7 +3668,6 @@ def merge_duplicate_flags(context):
             obj1.data.name = objName
         i=i+1
 
-    # Re-select the active object if it survived.
     try:
         if active_ref is not None and active_ref.name in bpy.data.objects:
             active_ref.select_set(True)
@@ -3659,7 +3695,6 @@ class merge_duplicate_objects(bpy.types.Operator):
         merge_duplicate(context)
         
         return {'FINISHED'}
-
 
 class toggle_face_orientation(bpy.types.Operator):
     bl_idname = "mkw.toggleface"
@@ -3736,8 +3771,6 @@ class kmp_area (bpy.types.Operator):
             if not object.is_area:
                 continue
             object_position = object.location
-
-
 
             areaNumber = '{0:0{1}X}'.format(x,2)
             areaShape = '{0:0{1}X}'.format(int(object.area_shape),2)
@@ -3857,8 +3890,6 @@ def create_collection(*args,name="MyCollection",parent=None):
             cols.objects.link(arg)
         bpy.context.view_layer.objects.active = args[0]
         
-
-
 
 class kmp_c_cube_area (bpy.types.Operator):
     bl_idname = "kmpc.c_cube_area"
@@ -4135,9 +4166,6 @@ class load_kmp_enemy(bpy.types.Operator, ImportHelper):
         bpy.ops.curve.handle_type_set(type='AUTOMATIC')
         bpy.ops.object.mode_set(mode='OBJECT')
 
-
-
-
         file.close()
         return {'FINISHED'}
 
@@ -4193,8 +4221,6 @@ def checkHEX23(name):
     if(name[-7] != "_"):
         return False
     return True
-
-
 
 def checkFlagInName(name,full=True,hex=False):
     if(full):
@@ -4310,7 +4336,6 @@ def frame_change_handler(scene):
                             bpy.ops.screen.animation_cancel(restore_frame=False)
             elif(mytool.kmp_cameStop):
                 bpy.ops.screen.animation_cancel(restore_frame=False)
-
 
 def get_prefs(context):
 	return context.preferences.addons[__name__].preferences
@@ -4683,7 +4708,6 @@ class ExportOBJKCL(bpy.types.Operator, ExportHelper):
         default=1.0,
     )
 
-
     path_mode: path_reference_mode
 
     check_extension = True
@@ -4937,7 +4961,6 @@ def register_area():
         description = "Checking this option will invert when condition is meet. For example if you have this AREA enabled only when the player is in chosen checkpoint range, it will make it enabled only when the player is OUTSIDE chosen checkpoint range"
     )
 
-
 def define_area_mats():
     for i in range(11):   
         matName = "kmpc.area.A" + str(i)
@@ -4946,7 +4969,6 @@ def define_area_mats():
             mat = bpy.data.materials.new(matName)
             mat.diffuse_color = matColors[i]
             mat.blend_method = 'BLEND' 
-
 
 def create_node_groups():
     create_mirror_group()
@@ -4978,7 +5000,6 @@ def NewNodeMenu(self, _context):
 classes = [refresh_wszst,remind_me_later,IndirectShaderGroup,ShaderTEVGroup,get_vertex_color,toggle_face_orientation,add_vertex_col,PreferenceProperty,add_mirrorUV,get_flag_back,add_mirrorU,add_trickable,add_reject, add_mirrorV, ShaderUtilities, MyProperties, restore_specular_metalic, ShaderGroupUtilities, export_minimap, set_alpha_hashed, KMPUtilities, remove_duplicate_materials, KCLSettings, KCLUtilities,ExportPrefs,ImportPrefs,ExportOBJKCL, AREAUtilities,CAMEUtilities, RouteUtilities, MaterialUtilities,add_blight, scene_setup, keyframes_to_route, openWSZSTPage, openIssuePage, timeline_to_route, set_alpha_blend, set_alpha_clip, remove_specular_metalic, create_camera, kmp_came, apply_kcl_flag, cursor_kmp, import_kcl_file, kmp_gobj, kmp_area, kmp_c_cube_area, kmp_c_cylinder_area, load_kmp_area, load_kmp_enemy, export_kcl_file, openGithub, merge_duplicate_objects, export_autodesk_dae,NODE_MT_category_wii]
  
 addon_keymaps = []
-
 
 def register():
     global wszstInstalled

@@ -25,8 +25,8 @@ file should be updated to match.
 
 ## Third-party components
 
-- `export_obj.py` — derived from the Blender OBJ exporter, GPL-2.0-or-later.
-- `lower-walls.txt` — a `wkclt` script by Wiimm (2015), recovered from upstream
+- `export_obj.py` -  derived from the Blender OBJ exporter, GPL-2.0-or-later.
+- `lower-walls.txt` -  a `wkclt` script by Wiimm (2015), recovered from upstream
   git history where it was removed but still shipped in release archives. It is
   part of the Wiimms SZS Tools ecosystem.
 

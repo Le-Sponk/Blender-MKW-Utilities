@@ -1,4 +1,4 @@
-"""Minimal registration check — works on both baseline and fixed code."""
+"""Minimal registration check."""
 import bpy, addon_utils, shutil, os, sys, traceback
 
 argv = sys.argv

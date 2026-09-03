@@ -1,5 +1,6 @@
-"""Strict KCL parser per the mkwiiki spec — validates a KCL independently
-of Wiimms' tools, the way a third-party editor (e.g. Lorenzi's KMP Editor)
+"""Strict KCL parser per the mkwiiki spec.
+
+Validates a KCL independently of Wiimms' tools, the way a third-party editor
 would.
 
 Header (0x3c):

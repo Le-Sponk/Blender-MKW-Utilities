@@ -1,6 +1,7 @@
-"""Regression test for the 'WSZST not detected' bug.
+"""Tool detection when PATH does not include the install location.
 
-Simulates Blender launched from a desktop icon (no /usr/local/bin on PATH).
+Simulates Blender launched from a desktop icon, which does not inherit the
+login shell's PATH.
 
 blender -b --factory-startup --python detect_test.py -- <addon_src>
 """

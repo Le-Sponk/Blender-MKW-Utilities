@@ -1,4 +1,4 @@
-"""MKW Utilities — environment diagnostic.
+"""MKW Utilities -  environment diagnostic.
 
 Run this INSIDE Blender (Scripting tab > New > paste > Run Script), then
 copy the console output. It reports how Blender is packaged and what it can

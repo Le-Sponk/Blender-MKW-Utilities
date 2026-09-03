@@ -1,4 +1,4 @@
-"""Reproduce the KCL import KeyError and validate export geometry.
+"""KCL export geometry and import of duplicate flag names.
 
 blender -b --factory-startup --python roundtrip_test.py -- <addon_src>
 """

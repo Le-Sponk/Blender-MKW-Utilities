@@ -3,7 +3,7 @@
 
 Produces a single archive that works both ways:
 
-  * Blender 4.2+  - Extensions system (drag-and-drop / Install from Disk).
+  * Blender 4.2+ - Extensions system (drag-and-drop / Install from Disk).
                     Uses blender_manifest.toml.
   * Blender 3.1 - 4.1 - Legacy add-on (Preferences > Add-ons > Install).
                     Uses bl_info.
@@ -22,6 +22,7 @@ PKG = "MKW-Utilities"
 FILES = [
     "__init__.py",
     "export_obj.py",
+    "export_dae.py",
     "blender_manifest.toml",
     "lower-walls.txt",
     "diagnose.py",

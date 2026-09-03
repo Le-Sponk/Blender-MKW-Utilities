@@ -3,9 +3,9 @@
 blender -b --factory-startup --python sandbox_test.py -- <addon_src> <mode>
 
 modes:
-  hostpath  - tools only reachable via /run/host/... (Flatpak filesystem=host)
-  snapfs    - tools only reachable via /var/lib/snapd/hostfs/...
-  detect    - sandbox markers present, tools genuinely absent
+  hostpath - tools only reachable via /run/host/... (Flatpak filesystem=host)
+  snapfs   - tools only reachable via /var/lib/snapd/hostfs/...
+  detect   - sandbox markers present, tools genuinely absent
 """
 import bpy, addon_utils, shutil, os, sys, traceback
 

@@ -12,11 +12,35 @@ from bpy_extras.wm_utils.progress_report import (
 )
 
 
+def strip_duplicate_suffix(name):
+    """Remove Blender's .001 style uniquifying suffixes.
+
+    These appear trailing on a datablock name and interior in a filename on
+    disk (road.png.001.png). Only exactly three digits count. A repeated
+    extension left behind by the strip is collapsed.
+    """
+    if not name:
+        return name
+
+    parts = name.split(".")
+    kept = [parts[0]]
+    for part in parts[1:]:
+        if len(part) == 3 and part.isdigit():
+            continue
+        kept.append(part)
+
+    while len(kept) > 2 and kept[-1].lower() == kept[-2].lower():
+        kept.pop()
+
+    result = ".".join(kept)
+    return result if result.strip(".") else name
+
+
 def name_compat(name):
     if name is None:
         return 'None'
     else:
-        return name.replace(' ', '_')
+        return strip_duplicate_suffix(name).replace(' ', '_')
 
 
 def mesh_triangulate(me):
@@ -387,7 +411,8 @@ def write_file(filepath, objects, depsgraph, scene,
                             smooth_groups, smooth_groups_tot = (), 0
 
                         materials = me.materials[:]
-                        material_names = [m.name if m else None for m in materials]
+                        material_names = [strip_duplicate_suffix(m.name) if m else None
+                                          for m in materials]
 
                         # avoid bad index errors
                         if not materials:

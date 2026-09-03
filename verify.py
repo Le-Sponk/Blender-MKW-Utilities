@@ -45,7 +45,7 @@ check("panels_registered", len(panels))
 ops = [o for o in dir(bpy.ops.kmpt)] if hasattr(bpy.ops, "kmpt") else []
 check("kmpt_operators", len(ops))
 
-# Principled socket handling — the 4.0/5.0 index reshuffle
+# Principled socket handling -  the 4.0/5.0 index reshuffle
 m = bpy.data.materials.new("verify_mat")
 m.use_nodes = True
 p = [n for n in m.node_tree.nodes if n.bl_idname == 'ShaderNodeBsdfPrincipled'][0]
