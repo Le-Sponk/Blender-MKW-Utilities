@@ -298,6 +298,21 @@ Fixes:
 
 ---
 
+## Headless export API
+
+Automation can call the export logic without going through `bpy.ops`:
+
+- `export_kcl(context, KclExportOptions(...), report)`
+- `export_collada(context, ColladaExportOptions(...), report)`
+- `export_minimap_brres(context, MinimapExportOptions(...), report)`
+
+`report` has Blender's `report(level, message)` signature. Each function returns
+a result dictionary with `ok`, `filepath`, `objects`, `triangles` and
+`skipped_objects`; format-specific fields include KCL `extent`, Collada
+`method`/`textures`/`texture_conflicts`, and minimap `method`. Failures return
+`ok: False` and `error`. The Blender operators are thin wrappers around these
+functions, so UI and headless exports use the same implementation.
+
 ## Development
 
 ```
@@ -308,7 +323,9 @@ Test scripts run against a real Blender binary:
 
 ```
 blender -b --factory-startup --python verify.py       -- <addon-dir>
-blender -b --factory-startup --python wszst_test.py   -- <addon-dir>
+blender -b --factory-startup --python dae_test.py      -- <addon-dir>
+blender -b --factory-startup --python kcl_test.py      -- <addon-dir>
+blender -b --factory-startup --python wszst_test.py    -- <addon-dir>
 blender -b --factory-startup --python detect_test.py  -- <addon-dir>
 blender -b --factory-startup --python sandbox_test.py -- <addon-dir> hostpath
 blender -b --factory-startup --python roundtrip_test.py -- <addon-dir>
@@ -317,7 +334,7 @@ blender -b --factory-startup --python roundtrip_test.py -- <addon-dir>
 `kcl_parse.py` is a standalone strict KCL parser used to validate exported
 files independently of Wiimms' tools.
 
-Verified against Blender 4.0.2, 4.1.1, 4.2.9 LTS, 4.5.9 LTS and 5.2.1 LTS,
+Verified against Blender 4.0.2, 4.1.1, 4.2.23 LTS, 4.5.9 LTS and 5.2.2 LTS,
 with Wiimms SZS Tools v2.42a and ABMatt v1.3.2.
 
 ---

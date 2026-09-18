@@ -25,6 +25,7 @@ import bmesh
 import numpy as np
 from mathutils import Vector
 import time
+from dataclasses import dataclass, fields
 import bpy
 
 from bpy.props import (
@@ -2879,6 +2880,66 @@ def getSchemeColor(context,kclType,trickable,drivable,shadow):
                 color[2] = color[2] - (0.5 * tintScale) + (tint[2] * tintScale)
     return color
 
+
+def _normalise_export_result(filepath, result):
+    """Give every callable export result the same automation-facing fields."""
+    normalised = {
+        "ok": False,
+        "filepath": filepath,
+        "objects": 0,
+        "triangles": 0,
+        "skipped_objects": [],
+        "error": None,
+    }
+    normalised.update(result)
+    return normalised
+
+
+def _export_options_from_operator(options_type, operator):
+    """Copy Blender operator properties into a plain export options object."""
+    return options_type(**{
+        field.name: getattr(operator, field.name) for field in fields(options_type)
+    })
+
+
+@dataclass
+class KclExportOptions:
+    """Inputs for :func:`export_kcl`, independent of Blender's operator API."""
+
+    filepath: str
+    kclExportScale: float = 100
+    kclExportQuality: str = "MEDIUM"
+    kclExportSelection: bool = False
+    kclExportFlagOnly: bool = True
+    kclExportLowerWallsBy: int = 30
+    kclExportLowerDegree: int = 45
+    kclExportUnBeanCorner: str = "LOWER"
+    kclExportFixAll: bool = False
+    kclExportDrop: bool = False
+    kclExportDropUnused: bool = False
+    kclExportDropFixed: bool = False
+    kclExportDropInvalid: bool = False
+    kclExportRemoveFacedown: bool = False
+    kclExportRemoveFaceup: bool = False
+    kclExportConvFaceup: bool = False
+    kclHEXOther: bool = False
+    kclExportTriArea: float = 1.0
+    kclExportTriHeight: float = 1.0
+    kclEncodeUseScale: bool = True
+    kclEncodeScale: tuple = (1.0, 1.0, 1.0)
+    kclEncodeShift: tuple = (0.0, 0.0, 0.0)
+    kclEncodeRotate: tuple = (0.0, 0.0, 0.0)
+    kclEncodeTranslate: tuple = (0.0, 0.0, 0.0)
+    kclSetKCL_BITS: int = 0
+    kclSetKCL_BLOW: int = 400
+    kclSetKCL_MAX: tuple = (0, 0, 0)
+    kclSetKCL_MAX_DEPTH: int = 10
+    kclSetKCL_MAX_TRI: int = 30
+    kclSetKCL_MIN: tuple = (0, 0, 0)
+    kclSetKCL_MIN_SIZE: int = 512
+    kclSetKCL_MAX_SIZE: int = 0
+
+
 class export_kcl_file(bpy.types.Operator):
     bl_idname = "kcl.export"
     bl_label = "Export KCL"
@@ -3052,191 +3113,230 @@ class export_kcl_file(bpy.types.Operator):
         row4.prop(self,"kclEncodeTranslate")
 
     def execute(self, context):
-        if context.scene.kcl_set_none:
-            context.scene.kcl_set_none = False
+        options = _export_options_from_operator(KclExportOptions, self)
+        result = export_kcl(context, options, self.report)
+        return {'FINISHED'} if result["ok"] else {'CANCELLED'}
 
-        filepath = self.filepath
-        activeObject = bpy.context.active_object
-        if hasattr(activeObject,"type"):
-            if(activeObject.type == "MESH"):
-                bpy.ops.object.mode_set(mode='OBJECT')
+
+def export_kcl(context, options, report):
+    """Export KCL, returning a result dictionary even when the export fails."""
+    try:
+        result = _export_kcl(context, options, report)
+    except Exception as exc:
+        report({"ERROR"}, "KCL export failed: %s" % exc)
+        result = {"ok": False, "error": str(exc)}
+    return _normalise_export_result(options.filepath, result)
+
+
+def _export_kcl(context, options, report):
+    """Implement the KCL export independently of Blender's operator API."""
+    if context.scene.kcl_set_none:
+        context.scene.kcl_set_none = False
+
+    filepath = options.filepath
+    activeObject = bpy.context.active_object
+    if hasattr(activeObject,"type"):
+        if(activeObject.type == "MESH"):
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+    selection = context.selected_objects
+    curTime = str(time.time())
+
+    objectsToExport = []
+    if(options.kclExportSelection):
+        objectsToExport = [obj for obj in selection if obj.type == "MESH"]
+    else:
+        objectsToExport = [obj for obj in bpy.data.objects if obj.type == "MESH"]
+
+    if(options.kclExportFlagOnly):
+        objectsToExport1 = [obj for obj in objectsToExport if checkFlagInName001(obj.name,full=False,hex=options.kclHEXOther)]
+        objectsToExport = objectsToExport1
+
+    if not objectsToExport:
+        report({"ERROR_INVALID_INPUT"},"Could not export. Output file would be empty.")
         
-        selection = context.selected_objects     
-        curTime = str(time.time())
+        return {"ok": False, "error": "No mesh objects matched"}
 
-        objectsToExport = []
-        if(self.kclExportSelection):
-            objectsToExport = selection
-        else:
-            objectsToExport = [obj for obj in bpy.data.objects if obj.type == "MESH"]
-        
-        if(self.kclExportFlagOnly):
-            objectsToExport1 = [obj for obj in objectsToExport if checkFlagInName001(obj.name,full=False,hex=self.kclHEXOther)]
-            objectsToExport = objectsToExport1
-
-        if not objectsToExport:
-            self.report({"ERROR_INVALID_INPUT"},"Could not export. Output file would be empty.")
-            
-            return {'CANCELLED'}
-
-        # Unflagged objects are dropped, which otherwise silently produces a
-        # near-empty file.
-        _all_meshes = [o for o in bpy.data.objects if o.type == "MESH"]
-        _skipped = [o.name for o in _all_meshes if o not in objectsToExport]
-        _n_tris = 0
-        _bb_min = [float("inf")] * 3
-        _bb_max = [float("-inf")] * 3
-        for _o in objectsToExport:
-            try:
-                _me = _o.data
-                _n_tris += sum(max(len(p.vertices) - 2, 0) for p in _me.polygons)
-                for _c in _o.bound_box:
-                    _w = _o.matrix_world @ Vector(_c)
-                    for _k in range(3):
-                        _bb_min[_k] = min(_bb_min[_k], _w[_k])
-                        _bb_max[_k] = max(_bb_max[_k], _w[_k])
-            except (AttributeError, ReferenceError):
-                pass
-        _extent = [(_bb_max[k] - _bb_min[k]) * self.kclExportScale for k in range(3)]
-        print("[MKW Utilities] KCL export: %d object(s), %d triangle(s)"
-              % (len(objectsToExport), _n_tris))
-        print("[MKW Utilities] KCL extent (game units): "
-              "X=%.1f Y=%.1f Z=%.1f  (scale=%g)"
-              % (_extent[0], _extent[1], _extent[2], self.kclExportScale))
-        if _skipped:
-            print("[MKW Utilities] SKIPPED (no valid KCL flag in name): "
-                  + ", ".join(_skipped))
-            self.report({"WARNING"},
-                        "%d object(s) skipped - no KCL flag in name (e.g. "
-                        "'road_F0000'). Exported %d object(s), %d triangles."
-                        % (len(_skipped), len(objectsToExport), _n_tris))
-        else:
-            self.report({"INFO"},
-                        "Exporting %d object(s), %d triangles."
-                        % (len(objectsToExport), _n_tris))
-
-        bpy.ops.object.select_all(action='DESELECT')
-        for obj in objectsToExport:
-            obj.select_set(True)
-
-        selectionBool = False
-        if(self.kclExportSelection or self.kclExportFlagOnly):
-            selectionBool = True
-
-        objfilename = filepath + curTime
+    # Unflagged objects are dropped, which otherwise silently produces a
+    # near-empty file.
+    _all_meshes = [o for o in bpy.data.objects if o.type == "MESH"]
+    _skipped = [o.name for o in _all_meshes if o not in objectsToExport]
+    _n_tris = 0
+    _bb_min = [float("inf")] * 3
+    _bb_max = [float("-inf")] * 3
+    for _o in objectsToExport:
         try:
-            bpy.ops.export_scene.objkcl(filepath=objfilename, use_selection=selectionBool, use_blen_objects=False, use_materials=False, use_normals=True, use_triangles=True, group_by_object=True, global_scale=self.kclExportScale,use_mesh_modifiers=True)
-        except:
-            self.report({"WARNING"}, "OBJ Export failed. Nothing was exported. Check the console for more details.")
-            return {'CANCELLED'}
-        wkclt_cmd = " ".join('"{0}"'.format(a) for a in tool_command("wkclt"))
-        wkclt = r'{0} encode "{1}" --dest "{2}"'.format(wkclt_cmd,objfilename,filepath)
-        if(self.kclEncodeScale[:] != (1.0,1.0,1.0)):
-            wkclt += (" --scale " + str(self.kclEncodeScale[:])[1:-1].replace(" ", ""))
-        if(self.kclEncodeShift[:] != (0.0,0.0,0.0)):
-            value = self.kclEncodeShift
-            if(self.kclEncodeUseScale):
-                value[0] = round(value[0] * self.kclExportScale,3)
-                value[1] = round(value[1] * self.kclExportScale,3)
-                value[2] = round(value[2] * self.kclExportScale,3)
-            wkclt += (" --shift " + str(value[:])[1:-1].replace(" ", ""))
-        
-        if(self.kclEncodeRotate[:] != (0.0,0.0,0.0)):
-            wkclt += (" --rot " + str(self.kclEncodeRotate[:])[1:-1].replace(" ", ""))
-        if(self.kclEncodeTranslate[:] != (0.0,0.0,0.0)):
-            value = self.kclEncodeTranslate
-            if(self.kclEncodeUseScale):
-                value[0] = round(value[0] * self.kclExportScale,4)
-                value[1] = round(value[1] * self.kclExportScale,4)
-                value[2] = round(value[2] * self.kclExportScale,4)
-            wkclt += (" --translate " + str(value[:])[1:-1].replace(" ", ""))
-        
-        if self.kclExportTriArea != 1.0:
-            wkclt += " --tri-area " + str(self.kclExportTriArea)
-        if self.kclExportTriHeight != 1.0:
-            wkclt += " --tri-height " + str(self.kclExportTriHeight)
-        wkclt += " -o --kcl="
-        wkclt += ("WEAKWALLS," if self.kclExportUnBeanCorner == "WEAK" or self.kclExportUnBeanCorner == "BOTH" else "")
-        wkclt += ("DROP," if self.kclExportDrop else "")
-        wkclt += ("FIXALL," if self.kclExportFixAll else "")
-        wkclt += ("DROPUNUSED," if self.kclExportDropUnused else "")
-        wkclt += ("DROPFIXED," if self.kclExportDropFixed else "")
-        wkclt += ("DROPINVALID," if self.kclExportDropInvalid else "")
-        wkclt += ("RMFACEDOWN," if self.kclExportRemoveFacedown else "")
-        wkclt += ("RMFACEUP," if self.kclExportRemoveFaceup else "")
-        wkclt += ("CONVFACEUP," if self.kclExportConvFaceup else "")
-        wkclt += ("HEX," if self.kclHEXOther else "")
-        if self.kclExportQuality != "CUSTOM":
-            wkclt += self.kclExportQuality
-        
-        script_file = os.path.normpath(__file__)
-        directory = os.path.dirname(script_file)
-        if (self.kclExportUnBeanCorner == "LOWER" or self.kclExportUnBeanCorner == "BOTH"):
+            _me = _o.data
+            _n_tris += sum(max(len(p.vertices) - 2, 0) for p in _me.polygons)
+            for _c in _o.bound_box:
+                _w = _o.matrix_world @ Vector(_c)
+                for _k in range(3):
+                    _bb_min[_k] = min(_bb_min[_k], _w[_k])
+                    _bb_max[_k] = max(_bb_max[_k], _w[_k])
+        except (AttributeError, ReferenceError):
+            pass
+    _extent = [(_bb_max[k] - _bb_min[k]) * options.kclExportScale for k in range(3)]
+    print("[MKW Utilities] KCL export: %d object(s), %d triangle(s)"
+          % (len(objectsToExport), _n_tris))
+    print("[MKW Utilities] KCL extent (game units): "
+          "X=%.1f Y=%.1f Z=%.1f  (scale=%g)"
+          % (_extent[0], _extent[1], _extent[2], options.kclExportScale))
+    if _skipped:
+        print("[MKW Utilities] SKIPPED (no valid KCL flag in name): "
+              + ", ".join(_skipped))
+        report({"WARNING"},
+                    "%d object(s) skipped - no KCL flag in name (e.g. "
+                    "'road_F0000'). Exported %d object(s), %d triangles."
+                    % (len(_skipped), len(objectsToExport), _n_tris))
+    else:
+        report({"INFO"},
+                    "Exporting %d object(s), %d triangles."
+                    % (len(objectsToExport), _n_tris))
 
-            script_path = os.path.join(directory, "lower-walls.txt")
-            if not os.path.isfile(script_path):
-                self.report({"ERROR"}, "lower-walls.txt is missing from the plugin folder; reinstall the add-on.")
-                return {'CANCELLED'}
-            wkclt += ' --kcl-script="{0}" --const lower={1},degree={2},'.format(
-                script_path, str(self.kclExportLowerWallsBy), str(self.kclExportLowerDegree))
-        else:
-            if(self.kclExportQuality == "CUSTOM"):
-                wkclt += " --const "
-        if(self.kclExportQuality == "CUSTOM"):
-            if(self.kclSetKCL_BITS != 0): 
-                wkclt += "KCL_BITS="+str(self.kclSetKCL_BITS) + ","
-            blow = str(self.kclSetKCL_BLOW) if self.kclSetKCL_BLOW > 0 else "400"
-            wkclt += "KCL_BLOW="+ blow + ","
-            if(self.kclSetKCL_MAX[:] != (0,0,0)): 
-                wkclt += "KCL_MAX=v"+str((self.kclSetKCL_MAX)[:]).replace(" ", "") + ","
-            if(self.kclSetKCL_MAX_DEPTH != 10 and self.kclSetKCL_MAX_DEPTH != 0):
-                wkclt += "KCL_MAX_DEPTH="+ str(self.kclSetKCL_MAX_DEPTH) + ","
-            if(self.kclSetKCL_MAX_TRI != 30 and self.kclSetKCL_MAX_TRI != 0):
-                wkclt += "KCL_MAX_TRI="+ str(self.kclSetKCL_MAX_TRI) + ","
-            if(self.kclSetKCL_MIN[:] != (0,0,0)): 
-                wkclt += "KCL_MIN=v"+str((self.kclSetKCL_MIN)[:]).replace(" ", "") + ","
-            if(self.kclSetKCL_MIN_SIZE != 512 and self.kclSetKCL_MIN_SIZE != 0):
-                wkclt += "KCL_MIN_SIZE="+ str(self.kclSetKCL_MIN_SIZE) + ","
-            if(self.kclSetKCL_MAX_SIZE != 0):
-                wkclt += "KCL_MAX_SIZE="+ str(self.kclSetKCL_MAX_SIZE) + ","
-        
-        print(wkclt)
-        time1 = time.time()
-        output = os.popen(wkclt).read()
-        diff = time.time() - time1
-        print(output)
-        print("KCL encoded in: {0}s".format(diff))
-        os.remove(objfilename)
-        bpy.ops.object.select_all(action='DESELECT')
+    bpy.ops.object.select_all(action='DESELECT')
+    for obj in objectsToExport:
+        obj.select_set(True)
 
-        # Signature
-        with open(filepath, 'r+b') as f:
-            filecontent = bytearray(f.read());
-            signature = bytearray();
-            signature.extend(map(ord,kcl_sign));
-            i = 0x3C;
-            filecontent[i:i] = signature;
-            saveData = bytes(filecontent);
-            f.seek(0)
-            f.write(saveData);
-            f.seek(i+5)
-            f.write(bytes(kcl_version))
-            f.seek(0)
-            # Patch Offsets
-            offset1 = struct.unpack(">I", f.read(4))[0]
-            offset2 = struct.unpack(">I", f.read(4))[0]
-            offset3 = struct.unpack(">I", f.read(4))[0]
-            offset4 = struct.unpack(">I", f.read(4))[0]
-            f.seek(0)
-            f.write(struct.pack('>I',offset1+8))
-            f.write(struct.pack('>I',offset2+8))
-            f.write(struct.pack('>I',offset3+8))
-            f.write(struct.pack('>I',offset4+8))
+    selectionBool = False
+    if(options.kclExportSelection or options.kclExportFlagOnly):
+        selectionBool = True
 
-        for obj in selection:
-            obj.select_set(True)
+    objfilename = filepath + curTime
+    try:
+        bpy.ops.export_scene.objkcl(filepath=objfilename, use_selection=selectionBool, use_blen_objects=False, use_materials=False, use_normals=True, use_triangles=True, group_by_object=True, global_scale=options.kclExportScale,use_mesh_modifiers=True)
+    except:
+        report({"WARNING"}, "OBJ Export failed. Nothing was exported. Check the console for more details.")
+        return {"ok": False, "error": "OBJ export failed"}
+    wkclt = tool_command("wkclt") + ["encode", objfilename, "--dest", filepath]
+    vector = lambda value: ",".join(str(item) for item in value)
+    if options.kclEncodeScale[:] != (1.0, 1.0, 1.0):
+        wkclt += ["--scale", vector(options.kclEncodeScale)]
+    if options.kclEncodeShift[:] != (0.0, 0.0, 0.0):
+        value = list(options.kclEncodeShift)
+        if options.kclEncodeUseScale:
+            value = [round(item * options.kclExportScale, 3) for item in value]
+        wkclt += ["--shift", vector(value)]
+    if options.kclEncodeRotate[:] != (0.0, 0.0, 0.0):
+        wkclt += ["--rot", vector(options.kclEncodeRotate)]
+    if options.kclEncodeTranslate[:] != (0.0, 0.0, 0.0):
+        value = list(options.kclEncodeTranslate)
+        if options.kclEncodeUseScale:
+            value = [round(item * options.kclExportScale, 4) for item in value]
+        wkclt += ["--translate", vector(value)]
+    if options.kclExportTriArea != 1.0:
+        wkclt += ["--tri-area", str(options.kclExportTriArea)]
+    if options.kclExportTriHeight != 1.0:
+        wkclt += ["--tri-height", str(options.kclExportTriHeight)]
 
-        return {'FINISHED'}
+    kcl_options = []
+    if options.kclExportUnBeanCorner in {"WEAK", "BOTH"}:
+        kcl_options.append("WEAKWALLS")
+    for enabled, name in (
+        (options.kclExportDrop, "DROP"),
+        (options.kclExportFixAll, "FIXALL"),
+        (options.kclExportDropUnused, "DROPUNUSED"),
+        (options.kclExportDropFixed, "DROPFIXED"),
+        (options.kclExportDropInvalid, "DROPINVALID"),
+        (options.kclExportRemoveFacedown, "RMFACEDOWN"),
+        (options.kclExportRemoveFaceup, "RMFACEUP"),
+        (options.kclExportConvFaceup, "CONVFACEUP"),
+        (options.kclHEXOther, "HEX"),
+    ):
+        if enabled:
+            kcl_options.append(name)
+    if options.kclExportQuality != "CUSTOM":
+        kcl_options.append(options.kclExportQuality)
+    wkclt += ["-o", "--kcl=" + ",".join(kcl_options)]
+
+    constants = []
+    if options.kclExportUnBeanCorner in {"LOWER", "BOTH"}:
+        directory = os.path.dirname(os.path.normpath(__file__))
+        script_path = os.path.join(directory, "lower-walls.txt")
+        if not os.path.isfile(script_path):
+            if os.path.isfile(objfilename):
+                os.remove(objfilename)
+            report({"ERROR"}, "lower-walls.txt is missing from the plugin folder; reinstall the add-on.")
+            return {"ok": False, "error": "lower-walls.txt is missing"}
+        wkclt += ["--kcl-script=" + script_path]
+        constants += ["lower=" + str(options.kclExportLowerWallsBy),
+                      "degree=" + str(options.kclExportLowerDegree)]
+    if options.kclExportQuality == "CUSTOM":
+        if options.kclSetKCL_BITS != 0:
+            constants.append("KCL_BITS=" + str(options.kclSetKCL_BITS))
+        blow = options.kclSetKCL_BLOW if options.kclSetKCL_BLOW > 0 else 400
+        constants.append("KCL_BLOW=" + str(blow))
+        if options.kclSetKCL_MAX[:] != (0, 0, 0):
+            constants.append("KCL_MAX=v" + vector(options.kclSetKCL_MAX))
+        if options.kclSetKCL_MAX_DEPTH not in {0, 10}:
+            constants.append("KCL_MAX_DEPTH=" + str(options.kclSetKCL_MAX_DEPTH))
+        if options.kclSetKCL_MAX_TRI not in {0, 30}:
+            constants.append("KCL_MAX_TRI=" + str(options.kclSetKCL_MAX_TRI))
+        if options.kclSetKCL_MIN[:] != (0, 0, 0):
+            constants.append("KCL_MIN=v" + vector(options.kclSetKCL_MIN))
+        if options.kclSetKCL_MIN_SIZE not in {0, 512}:
+            constants.append("KCL_MIN_SIZE=" + str(options.kclSetKCL_MIN_SIZE))
+        if options.kclSetKCL_MAX_SIZE != 0:
+            constants.append("KCL_MAX_SIZE=" + str(options.kclSetKCL_MAX_SIZE))
+    if constants:
+        wkclt += ["--const", ",".join(constants) + ","]
+
+    print(wkclt)
+    time1 = time.time()
+    try:
+        process = subprocess.run(
+            wkclt, capture_output=True, text=True, check=False, timeout=120)
+    except Exception:
+        if os.path.isfile(objfilename):
+            os.remove(objfilename)
+        raise
+    output = process.stdout + process.stderr
+    if process.returncode != 0 or not os.path.isfile(filepath):
+        if os.path.isfile(objfilename):
+            os.remove(objfilename)
+        error = output.strip() or "wkclt did not produce a KCL file"
+        report({"ERROR"}, "KCL encoding failed: " + error)
+        return {"ok": False, "error": error}
+    diff = time.time() - time1
+    print(output)
+    print("KCL encoded in: {0}s".format(diff))
+    os.remove(objfilename)
+    bpy.ops.object.select_all(action='DESELECT')
+
+    # Signature
+    with open(filepath, 'r+b') as f:
+        filecontent = bytearray(f.read());
+        signature = bytearray();
+        signature.extend(map(ord,kcl_sign));
+        i = 0x3C;
+        filecontent[i:i] = signature;
+        saveData = bytes(filecontent);
+        f.seek(0)
+        f.write(saveData);
+        f.seek(i+5)
+        f.write(bytes(kcl_version))
+        f.seek(0)
+        # Patch Offsets
+        offset1 = struct.unpack(">I", f.read(4))[0]
+        offset2 = struct.unpack(">I", f.read(4))[0]
+        offset3 = struct.unpack(">I", f.read(4))[0]
+        offset4 = struct.unpack(">I", f.read(4))[0]
+        f.seek(0)
+        f.write(struct.pack('>I',offset1+8))
+        f.write(struct.pack('>I',offset2+8))
+        f.write(struct.pack('>I',offset3+8))
+        f.write(struct.pack('>I',offset4+8))
+
+    for obj in selection:
+        obj.select_set(True)
+
+    return {
+        "ok": True,
+        "filepath": filepath,
+        "objects": len(objectsToExport),
+        "triangles": _n_tris,
+        "skipped_objects": _skipped,
+        "extent": tuple(_extent),
+    }
 
 class import_kcl_file(bpy.types.Operator):
     bl_idname = "kcl.load"
@@ -3340,6 +3440,19 @@ class import_kcl_file(bpy.types.Operator):
 
         return {'FINISHED'}
 
+@dataclass
+class ColladaExportOptions:
+    """Inputs for :func:`export_collada`, independent of the UI operator."""
+
+    filepath: str
+    daeExportPathMode: str = "AUTO"
+    daeExportSelection: bool = False
+    daeExportCollection: bool = False
+    daeExportScale: float = 100
+    daeExportCopyTextures: bool = True
+    daeExportMethod: str = "AUTO"
+
+
 class export_autodesk_dae(bpy.types.Operator, ExportHelper):
     bl_idname = "export.autodesk_dae"
     bl_label = "Export Autodesk DAE"    
@@ -3389,53 +3502,85 @@ class export_autodesk_dae(bpy.types.Operator, ExportHelper):
             layout.prop(self, "daeExportCopyTextures")
 
     def execute(self, context):
-        filepath = self.filepath
+        options = _export_options_from_operator(ColladaExportOptions, self)
+        result = export_collada(context, options, self.report)
+        return {'FINISHED'} if result["ok"] else {'CANCELLED'}
 
-        if self.daeExportMethod == 'AUTO' and fbx_converter_path():
-            bpy.ops.export_scene.fbx(filepath = filepath, use_selection = self.daeExportSelection,  
-                                     filter_glob='*.dae', use_active_collection = self.daeExportCollection, 
-                                     global_scale = self.daeExportScale, apply_scale_options='FBX_SCALE_NONE', 
-                                     object_types={'MESH','ARMATURE'}, use_mesh_modifiers=True, path_mode=self.daeExportPathMode, 
-                                     bake_anim=False, add_leaf_bones=False)
-            try:
-                dae_convert(filepath=filepath)
-            except Exception as exc:
-                self.report({'ERROR'}, "FbxConverter failed: %s" % exc)
-                return {'CANCELLED'}
-            return {'FINISHED'}
 
-        objects = dae_source_objects(context, self.daeExportSelection,
-                                     self.daeExportCollection)
-        if not objects:
-            self.report({'ERROR_INVALID_INPUT'},
-                        "Nothing to export. No mesh objects matched.")
-            return {'CANCELLED'}
+def export_collada(context, options, report):
+    """Export Collada, returning a result dictionary even on failure."""
+    try:
+        result = _export_collada(context, options, report)
+    except Exception as exc:
+        report({'ERROR'}, "Collada export failed: %s" % exc)
+        result = {"ok": False, "error": str(exc)}
+    return _normalise_export_result(options.filepath, result)
 
+
+def _export_collada(context, options, report):
+    """Implement Collada export independently of Blender's operator API."""
+    filepath = options.filepath
+    objects = dae_source_objects(context, options.daeExportSelection,
+                                 options.daeExportCollection)
+    skipped = [ob.name for ob in context.scene.objects
+               if ob.type == 'MESH' and ob not in objects]
+    if not objects:
+        report({'ERROR_INVALID_INPUT'},
+               "Nothing to export. No mesh objects matched.")
+        return {"ok": False, "error": "No mesh objects matched"}
+
+    if options.daeExportMethod == 'AUTO' and fbx_converter_path():
+        bpy.ops.export_scene.fbx(
+            filepath=filepath, use_selection=options.daeExportSelection,
+            filter_glob='*.dae', use_active_collection=options.daeExportCollection,
+            global_scale=options.daeExportScale,
+            apply_scale_options='FBX_SCALE_NONE',
+            object_types={'MESH', 'ARMATURE'}, use_mesh_modifiers=True,
+            path_mode=options.daeExportPathMode, bake_anim=False,
+            add_leaf_bones=False)
         try:
-            meshes, tris, textures, conflicts = export_dae.write_dae(
-                filepath, objects, global_scale=self.daeExportScale,
-                copy_textures=self.daeExportCopyTextures)
+            dae_convert(filepath=filepath)
         except Exception as exc:
-            self.report({'ERROR'}, "Collada export failed: %s" % exc)
-            return {'CANCELLED'}
+            report({'ERROR'}, "FbxConverter failed: %s" % exc)
+            return {"ok": False, "error": str(exc)}
+        triangles = sum(sum(max(len(poly.vertices) - 2, 0)
+                            for poly in ob.data.polygons) for ob in objects)
+        return {
+            "ok": True, "filepath": filepath, "method": "fbx_converter",
+            "objects": len(objects), "triangles": triangles,
+            "skipped_objects": skipped, "textures": [],
+            "texture_conflicts": [],
+        }
 
-        if not meshes:
-            self.report({'ERROR_INVALID_INPUT'},
-                        "Nothing to export. Selected objects have no faces.")
-            return {'CANCELLED'}
+    try:
+        meshes, tris, textures, conflicts = export_dae.write_dae(
+            filepath, objects, global_scale=options.daeExportScale,
+            copy_textures=options.daeExportCopyTextures)
+    except Exception as exc:
+        report({'ERROR'}, "Collada export failed: %s" % exc)
+        return {"ok": False, "error": str(exc)}
 
-        message = "Collada export: %d object(s), %d triangle(s)" % (meshes, tris)
-        if self.daeExportCopyTextures:
-            message += ", %d texture(s)" % len(textures)
-        self.report({'INFO'}, message)
+    if not meshes:
+        report({'ERROR_INVALID_INPUT'},
+               "Nothing to export. Selected objects have no faces.")
+        return {"ok": False, "error": "Selected objects have no faces"}
 
-        if conflicts:
-            self.report(
-                {'WARNING'},
-                "Renamed to avoid a texture name clash: "
-                + ", ".join(conflicts[:5])
-                + ("..." if len(conflicts) > 5 else ""))
-        return {'FINISHED'}
+    message = "Collada export: %d object(s), %d triangle(s)" % (meshes, tris)
+    if options.daeExportCopyTextures:
+        message += ", %d texture(s)" % len(textures)
+    report({'INFO'}, message)
+    if conflicts:
+        report(
+            {'WARNING'},
+            "Renamed to avoid a texture name clash: "
+            + ", ".join(conflicts[:5])
+            + ("..." if len(conflicts) > 5 else ""))
+    return {
+        "ok": True, "filepath": filepath, "method": "builtin",
+        "objects": meshes, "triangles": tris,
+        "skipped_objects": skipped, "textures": list(textures),
+        "texture_conflicts": list(conflicts),
+    }
 
 def dae_source_objects(context, selection_only, active_collection):
     """Mesh objects a Collada export should include."""
@@ -3475,6 +3620,16 @@ def dae_convert(filepath):
     os.remove(filepath)
     os.replace(daeFile, filepath)
 
+@dataclass
+class MinimapExportOptions:
+    """Inputs for :func:`export_minimap_brres`, independent of the UI operator."""
+
+    filepath: str
+    exportScale: float = 100
+    exportSelection: bool = False
+    exportCollection: bool = False
+
+
 class export_minimap(bpy.types.Operator, ExportHelper):
     bl_idname = "export.minimap"
     bl_label = "ABMatt: Export Minimap BRRES"    
@@ -3491,82 +3646,147 @@ class export_minimap(bpy.types.Operator, ExportHelper):
 
     @classmethod
     def poll(cls, context):
-        return _detect_abmatt()
+        if not _detect_abmatt():
+            cls.poll_message_set(
+                "ABMatt was not found. Install it or configure its path in "
+                "the add-on preferences.")
+            return False
+        return True
 
     def execute(self, context):
-        filepath = self.filepath
-        directory = os.path.dirname(filepath)
-        filename = os.path.basename(filepath)
-        name = '.'.join(filename.split(".")[:-1])
-        curTime = str(time.time())
-        if not 'map' in name:
-            name += ".map"
-        brresName = name + ".brres"
-        brresFilepath = os.path.join(directory, brresName)
+        options = _export_options_from_operator(MinimapExportOptions, self)
+        result = export_minimap_brres(context, options, self.report)
+        return {'FINISHED'} if result["ok"] else {'CANCELLED'}
 
-        # ABMatt fails with an AttributeError on meshes with no material.
-        if self.exportSelection:
-            candidates = [o for o in context.selected_objects if o.type == 'MESH']
-        elif self.exportCollection:
-            candidates = [o for o in context.collection.objects if o.type == 'MESH']
-        else:
-            candidates = [o for o in context.scene.objects if o.type == 'MESH']
-        missing = [o.name for o in candidates
-                   if not any(s.material for s in o.material_slots)]
-        if missing:
-            self.report(
-                {"ERROR"},
-                "ABMatt requires every exported mesh to have a material. "
-                "Missing on: " + ", ".join(missing[:5])
-                + ("..." if len(missing) > 5 else ""))
-            return {'CANCELLED'}
 
-        # ABMatt accepts DAE or OBJ. Prefer the bundled Autodesk converter
-        # where it exists, otherwise write Collada directly.
-        interFilepath = os.path.join(directory, name + curTime + ".dae")
-        if fbx_converter_path():
-            bpy.ops.export_scene.fbx(filepath = interFilepath, use_selection = self.exportSelection, filter_glob='*.dae', use_active_collection = self.exportCollection, global_scale = self.exportScale, apply_scale_options='FBX_SCALE_NONE', object_types={'MESH'}, use_mesh_modifiers=True, bake_anim=False)
-            try:
-                dae_convert(filepath=interFilepath)
-            except RuntimeError as exc:
-                self.report({"ERROR"}, str(exc))
-                if os.path.isfile(interFilepath):
-                    os.remove(interFilepath)
-                return {'CANCELLED'}
-        else:
-            objects = dae_source_objects(context, self.exportSelection,
-                                         self.exportCollection)
-            if not objects:
-                self.report({"ERROR_INVALID_INPUT"},
-                            "Nothing to export. No mesh objects matched.")
-                return {'CANCELLED'}
-            try:
-                export_dae.write_dae(interFilepath, objects,
-                                     global_scale=self.exportScale,
-                                     copy_textures=True)
-            except Exception as exc:
-                self.report({"ERROR"}, "Collada export failed: %s" % exc)
-                if os.path.isfile(interFilepath):
-                    os.remove(interFilepath)
-                return {'CANCELLED'}
+def export_minimap_brres(context, options, report):
+    """Export minimap BRRES, returning a result dictionary even on failure."""
+    try:
+        result = _export_minimap_brres(context, options, report)
+    except Exception as exc:
+        report({'ERROR'}, "Minimap export failed: %s" % exc)
+        result = {"ok": False, "error": str(exc)}
+    return _normalise_export_result(options.filepath, result)
 
-        abmatt_cmd = tool_command("abmatt")
-        subprocess.run(abmatt_cmd + ["convert", interFilepath, "to", brresFilepath, "-o"], check=False)
-        subprocess.run(abmatt_cmd + ["-b", brresFilepath, "-o", "-n", "*",
-                        "-k", "SCALE", "-v", "multiplyby1"], check=False)
 
+def _export_minimap_brres(context, options, report):
+    """Implement minimap BRRES export independently of the UI operator."""
+    filepath = options.filepath
+    if not _detect_abmatt():
+        message = "ABMatt was not found. Install it or configure its path."
+        report({'ERROR'}, message)
+        return {"ok": False, "error": message}
+    directory = os.path.dirname(filepath)
+    filename = os.path.basename(filepath)
+    name = '.'.join(filename.split(".")[:-1])
+    curTime = str(time.time())
+    if 'map' not in name:
+        name += ".map"
+    brresName = name + ".brres"
+    brresFilepath = os.path.join(directory, brresName)
+
+    candidates = dae_source_objects(
+        context, options.exportSelection, options.exportCollection)
+    skipped = [o.name for o in context.scene.objects
+               if o.type == 'MESH' and o not in candidates]
+    triangles = sum(sum(max(len(poly.vertices) - 2, 0)
+                        for poly in ob.data.polygons) for ob in candidates)
+
+    # ABMatt fails with an AttributeError on meshes with no material.
+    missing = [o.name for o in candidates
+               if not any(s.material for s in o.material_slots)]
+    if missing:
+        report(
+            {"ERROR"},
+            "ABMatt requires every exported mesh to have a material. "
+            "Missing on: " + ", ".join(missing[:5])
+            + ("..." if len(missing) > 5 else ""))
+        return {"ok": False, "error": "Meshes have no material",
+                "missing_materials": missing}
+
+    # ABMatt accepts DAE or OBJ. Prefer the bundled Autodesk converter
+    # where it exists, otherwise write Collada directly.
+    interFilepath = os.path.join(directory, name + curTime + ".dae")
+    method = "fbx_converter" if fbx_converter_path() else "builtin"
+    if fbx_converter_path():
+        bpy.ops.export_scene.fbx(
+            filepath=interFilepath, use_selection=options.exportSelection,
+            filter_glob='*.dae', use_active_collection=options.exportCollection,
+            global_scale=options.exportScale,
+            apply_scale_options='FBX_SCALE_NONE', object_types={'MESH'},
+            use_mesh_modifiers=True, bake_anim=False)
+        try:
+            dae_convert(filepath=interFilepath)
+        except RuntimeError as exc:
+            report({"ERROR"}, str(exc))
+            if os.path.isfile(interFilepath):
+                os.remove(interFilepath)
+            return {"ok": False, "error": str(exc)}
+    else:
+        if not candidates:
+            report({"ERROR_INVALID_INPUT"},
+                   "Nothing to export. No mesh objects matched.")
+            return {"ok": False, "error": "No mesh objects matched"}
+        try:
+            export_dae.write_dae(interFilepath, candidates,
+                                 global_scale=options.exportScale,
+                                 copy_textures=True)
+        except Exception as exc:
+            report({"ERROR"}, "Collada export failed: %s" % exc)
+            if os.path.isfile(interFilepath):
+                os.remove(interFilepath)
+            return {"ok": False, "error": str(exc)}
+
+    abmatt_cmd = tool_command("abmatt")
+    backup = brresFilepath + ".mkw-backup-" + curTime
+    if os.path.isfile(brresFilepath):
+        os.replace(brresFilepath, backup)
+    try:
+        processes = [
+            subprocess.run(
+                abmatt_cmd + ["convert", interFilepath, "to", brresFilepath, "-o"],
+                capture_output=True, text=True, check=False, timeout=120),
+        ]
+        if processes[0].returncode == 0 and os.path.isfile(brresFilepath):
+            processes.append(subprocess.run(
+                abmatt_cmd + ["-b", brresFilepath, "-o", "-n", "*",
+                               "-k", "SCALE", "-v", "multiplyby1"],
+                capture_output=True, text=True, check=False, timeout=120))
+    except Exception:
         for tmp in (interFilepath, os.path.splitext(interFilepath)[0] + ".mtl"):
             if os.path.isfile(tmp):
                 os.remove(tmp)
+        if os.path.isfile(brresFilepath):
+            os.remove(brresFilepath)
+        if os.path.isfile(backup):
+            os.replace(backup, brresFilepath)
+        raise
 
-        if not os.path.isfile(brresFilepath):
-            self.report({"ERROR"}, "ABMatt did not produce a BRRES file. Check the console.")
-            return {'CANCELLED'}
+    for tmp in (interFilepath, os.path.splitext(interFilepath)[0] + ".mtl"):
+        if os.path.isfile(tmp):
+            os.remove(tmp)
 
-        if(brresFilepath != filepath):
-            os.replace(brresFilepath, filepath)
+    failed = next((process for process in processes if process.returncode != 0), None)
+    if failed is not None or not os.path.isfile(brresFilepath):
+        if os.path.isfile(brresFilepath):
+            os.remove(brresFilepath)
+        if os.path.isfile(backup):
+            os.replace(backup, brresFilepath)
+        detail = "ABMatt did not produce a BRRES file"
+        if failed is not None:
+            detail = (failed.stderr or failed.stdout).strip() or detail
+        report({"ERROR"}, "ABMatt export failed: " + detail)
+        return {"ok": False, "error": detail}
 
-        return {'FINISHED'}
+    if os.path.isfile(backup):
+        os.remove(backup)
+    if brresFilepath != filepath:
+        os.replace(brresFilepath, filepath)
+    return {
+        "ok": True, "filepath": filepath, "method": method,
+        "objects": len(candidates), "triangles": triangles,
+        "skipped_objects": skipped,
+    }
 
 def export_autodesk_dae_button(self, context):
     self.layout.operator("export.autodesk_dae", text="Autodesk Collada (.dae)")
