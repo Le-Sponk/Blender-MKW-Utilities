@@ -45,6 +45,22 @@ check("panels_registered", len(panels))
 ops = [o for o in dir(bpy.ops.kmpt)] if hasattr(bpy.ops, "kmpt") else []
 check("kmpt_operators", len(ops))
 
+# A missing ABMatt must provide a useful disabled-operator message rather than
+# Blender's generic "context is incorrect".
+_detect_abmatt = mod._detect_abmatt
+_poll_message_set = mod.export_minimap.poll_message_set
+_messages = []
+try:
+    mod._detect_abmatt = lambda: False
+    mod.export_minimap.poll_message_set = lambda message: _messages.append(message)
+    check("minimap_poll_rejects_missing_abmatt",
+          mod.export_minimap.poll(bpy.context) is False)
+    check("minimap_poll_explains_missing_abmatt",
+          bool(_messages) and "ABMatt was not found" in _messages[-1])
+finally:
+    mod._detect_abmatt = _detect_abmatt
+    mod.export_minimap.poll_message_set = _poll_message_set
+
 # Principled socket handling -  the 4.0/5.0 index reshuffle
 m = bpy.data.materials.new("verify_mat")
 m.use_nodes = True
@@ -96,3 +112,5 @@ for k, v in results.items():
 bad = [k for k, v in results.items()
        if v is False or (isinstance(v, int) and not isinstance(v, bool) and v == 0)]
 print("VERDICT:", "PASS" if not bad else "FAIL " + ",".join(bad))
+if bad:
+    raise SystemExit(1)

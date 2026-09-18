@@ -82,8 +82,19 @@ def main():
 
     build_scene()
     path = os.path.join(out, "scene.dae")
-    bpy.ops.export.autodesk_dae("EXEC_DEFAULT", filepath=path,
-                                daeExportScale=100)
+    options = mod.ColladaExportOptions(filepath=path, daeExportScale=100)
+    reports = []
+    result = mod.export_collada(
+        bpy.context, options, lambda level, message: reports.append((level, message)))
+    check("result dict reports success", result["ok"] is True)
+    check("result dict object count", result["objects"] == 3,
+          str(result.get("objects")))
+    check("result dict triangle count", result["triangles"] > 0,
+          str(result.get("triangles")))
+    check("result dict skipped names", result["skipped_objects"] == [],
+          str(result.get("skipped_objects")))
+    check("result dict export method", result["method"] == "builtin",
+          str(result.get("method")))
     check("file written", os.path.isfile(path))
 
     root = ET.parse(path).getroot()
@@ -183,6 +194,17 @@ def main():
         cancelled = "Nothing to export" in str(exc)
     check("empty selection cancels", cancelled)
     check("no file on cancel", not os.path.isfile(empty))
+    reports = []
+    failed = mod.export_collada(
+        bpy.context,
+        mod.ColladaExportOptions(filepath=empty, daeExportSelection=True),
+        lambda level, message: reports.append((level, message)),
+    )
+    common = {"ok", "filepath", "objects", "triangles",
+              "skipped_objects", "error"}
+    check("failure result has stable schema", common <= set(failed), str(failed))
+    check("failure result reports error",
+          failed["ok"] is False and bool(failed["error"]), str(failed))
 
     check("FbxConverter absent here", mod.fbx_converter_path() is None)
 
@@ -290,6 +312,8 @@ def main():
     check("one texture written", len(pngs) == 1, str(pngs))
 
     print("VERDICT: %s" % ("PASS" if not FAILURES else "FAIL " + ",".join(FAILURES)))
+    if FAILURES:
+        raise SystemExit(1)
 
 
 main()
